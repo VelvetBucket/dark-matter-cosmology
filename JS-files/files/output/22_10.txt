@@ -1,0 +1,42 @@
+
+Dark matter candidate is '~N1' with spin=1/2 mass=2.91E-01
+
+=== MASSES OF HIGGS AND ODD PARTICLES: ===
+Higgs masses and widths
+      h   125.10 3.88E-03
+
+Masses of odd sector Particles:
+~N1      : MN1     =   0.291 || ~etI     : MetI    =  83.704 || ~etR     : MetR    =  83.704 
+~etp     : Metp    = 183.704 || ~N2      : MN2     = 10000000000.000 || ~N3      : MN3     = 10200000000.000 
+
+
+==== Calculation of relic density =====
+Xf=1.8031010348e+01
+Omega=1.3062158882e+00
+MN1=2.9126677400e-01
+MetR=8.3704351200e+01
+MetI=8.3704350900e+01
+Metp=1.8370435100e+02
+lam1=2.5814825700e-01
+lam2=1.0000000000e-02
+lam3=1.0000000000e-01
+lam4=8.8218589700e-01
+lam5=1.0000000000e-09
+Yn11=2.8180925500e+00
+Yn12=1.5902476300e+00
+Yn13=1.1983544600e+00
+Yn21=2.0663718800e+02
+Yn22=1.7623998000e+02
+Yn23=2.5206023700e+02
+Yn31=5.8850389600e+01
+Yn32=2.9727841400e+02
+Yn33=2.5610156300e+02
+# Channels which contribute to 1/(omega) more than 1%.
+# Relative contributions in % are displayed
+   43% ~N1 ~N1 ->nu1 nu1 
+   27% ~N1 ~N1 ->nu1 nu2 
+   15% ~N1 ~N1 ->nu1 nu3 
+    5% ~N1 ~N1 ->nu2 nu3 
+    4% ~N1 ~N1 ->nu2 nu2 
+    2% ~N1 ~N1 ->e1 E1 
+    1% ~N1 ~N1 ->nu3 nu3 
