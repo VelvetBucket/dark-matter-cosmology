@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Defining foldere variables
-mg5_output_folder="../DM_test2"
+mg5_output_folder="../DM_test"
 working_folder=$(pwd)
 
 # copying lib and src folders to working directory
@@ -21,13 +21,38 @@ make -s -C "./src"
 
 # extracting subprocess folders name 
 cd "$mg5_output_folder/SubProcesses"
-subprocess_folders=($(ls -d */))
+unfiltered_processes=($(ls -d */))
+
+particle_file="$working_folder/allowed_particles.txt"
+if [[ -s $particle_file ]]; then
+    	echo "OVERSEER: Particles file exists."
+    	mapfile -t particles < $particle_file
+    	#echo "${particles[@]}"
+    
+	subprocess_folders=()
+	for process in "${unfiltered_processes[@]}"; do
+		for in1 in "${particles[@]}"; do
+			for in2 in "${particles[@]}"; do
+				if [[ "$process" == *"_$in1$in2_"* ]]; then
+					#echo $process
+					subprocess_folders+=("$process")
+		    			break 2
+				fi
+			done
+	    	done
+	done
+else
+	echo "OVERSEER: Particles file does not exist. Running all processes."
+	subprocess_folders=("${unfiltered_processes[@]}")
+fi
 
 ## Moving back to working directory
 cd "$working_folder"
 
 i=1
 sp_number=${#subprocess_folders[@]}
+
+echo "OVERSEER: Processes to evaluate: $sp_number"
 
 # Running over each subprocess
 for sp_folder in "${subprocess_folders[@]}"
@@ -48,7 +73,7 @@ do
 	#sed -i -e 's/void sigmaKin()/double sigmaKin(double s, double theta)/g' "$working_folder/process/CPPProcess.h"
 	wait
 	# Run make
-	make -s
+	make -s check
 	
 	# Run over param_cards
 	param_cards=($(ls "./cards/"))
@@ -85,4 +110,18 @@ do
 	out_files=$(ls $out_folder/P*.dat)
 	totals=$(sort -g $out_files | datamash -W --format=%.8e groupby 1 sum 2 )
 	echo "$totals" > "$out_folder/TOTALS_T.dat"
+done
+
+for out_folder in "${output_folders[@]}"
+do
+	out_files=$(ls $out_folder/P*n1n1*.dat)
+	totals=$(sort -g $out_files | datamash -W --format=%.8e groupby 1 sum 2 )
+	echo "$totals" > "$out_folder/TOTALS_n1.dat"
+done
+
+for out_folder in "${output_folders[@]}"
+do
+	out_files=$(ls $out_folder/P*etretr*.dat)
+	totals=$(sort -g $out_files | datamash -W --format=%.8e groupby 1 sum 2 )
+	echo "$totals" > "$out_folder/TOTALS_etr.dat"
 done

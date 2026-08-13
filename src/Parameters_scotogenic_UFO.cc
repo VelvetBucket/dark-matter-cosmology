@@ -1,6 +1,6 @@
 //==========================================================================
 // This file has been automatically generated for C++ by
-// MadGraph5_aMC@NLO v. 3.6.6, 2025-10-30
+// MadGraph5_aMC@NLO v. 3.6.7, 2026-01-05
 // By the MadGraph5_aMC@NLO Development Team
 // Visit launchpad.net/madgraph5 and amcatnlo.web.cern.ch
 //==========================================================================

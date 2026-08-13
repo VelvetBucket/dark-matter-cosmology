@@ -6,6 +6,25 @@ LIBFLAGS= -L$(LIBDIR) -l$(MODELLIB)
 
 objects = ./main.o ./process/CPPProcess.o ./process/momenta.o ./tools/integration.o ./tools/bessel.o
 
+interp_objs = ./interp.o ./tools/data_handling.o ./tools/interpolation.o
+
+evolution_objs = ./evolution.o ./tools/data_handling.o ./tools/interpolation.o
+
+## Getting N evolution
+evolution: $(evolution_objs)
+	$(CXX) $(CXXFLAGS) -g -o $@ $(evolution_objs)
+	
+./evolution.o: ./evolution.cpp  ./tools/tools.h 
+	$(CXX) -c $(CXXFLAGS) -g -o $@ $<
+
+## Getting a-T-Hubble table
+interp: $(interp_objs)
+	$(CXX) $(CXXFLAGS) -g -o $@ $(interp_objs)
+
+./interp.o: ./interp.cpp  ./tools/tools.h 
+	$(CXX) -c $(CXXFLAGS) -g -o $@ $<
+
+## Getting sigma*v
 check: $(objects) $(LIBDIR)/lib$(MODELLIB).a
 	$(CXX) $(CXXFLAGS) -g -o $@ $(objects) $(LIBFLAGS) -lgsl -lgslcblas -lm
 
@@ -26,6 +45,12 @@ $(LIBDIR)/lib$(MODELLIB).a: $(INCDIR)/HelAmps_scotogenic_UFO.cc  $(INCDIR)/Param
 	
 ./tools/bessel.o: ./tools/bessel.cc ./tools/tools.h
 	$(CXX) -c $(CXXFLAGS) -g -o $@ $<
+
+./tools/interpolation.o: ./tools/interpolation.cc ./tools/tools.h
+	$(CXX) -c $(CXXFLAGS) -g -o $@ $< 
+	
+./tools/data_handling.o: ./tools/data_handling.cc ./tools/tools.h
+	$(CXX) -c $(CXXFLAGS) -g -o $@ $< 
 
 .PHONY: clean .FORCE
 

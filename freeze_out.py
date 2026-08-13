@@ -7,8 +7,9 @@ from scipy.interpolate import CubicSpline
 from scipy.optimize import brentq
 from scipy.optimize import fsolve
 from scipy.special import kv
+from scipy.optimize import bisect
 
-cards = sorted([name.replace('.dat','') for name in os.listdir("./cards")])
+cards = sorted([name.replace('.dat','') for name in os.listdir("./cards_v2")])
 
 ### Getting JS "true" values
 xf_line = "Xf="
@@ -18,7 +19,7 @@ masses = dict()
 xfs = dict()
 
 for card in cards:
-    file = "./JS-files/files/output/" + card + ".txt"
+    file = "./JS-files/files_v2/output/" + card + ".txt"
     #print(card)
     mass = 0.
     xf = 0.
@@ -55,79 +56,82 @@ plt.close()
 ### Getting my values
 
 my_masses = dict()
-my_xfs = dict()
-my_xfs1 = dict()
+my_xfs_mycode = dict()
+my_xfs_micromegas = dict()
 
-mi_points='1000'
-my_points='0500'
+mi_points=''
+my_points=''
 
 Mp = 2.435e+18
 
-for card in cards:
-    # print(card)
-    xs_mine1, sv_mine1 = np.loadtxt(f"./output-{my_points}/"+card+"/TOTALS_T.dat", unpack=True)
-    xs_mine, sv_mine = np.loadtxt(f"./micromegas_output/m1T-1_vs_sigmaV-{mi_points}/"+card+".dat", unpack=True)
-    neq_file = f"./output-{my_points}/" + card + "/neq.dat"
-    with open(neq_file) as myfile:
-        m1 = float(myfile.readline().replace('# m1 =',''))
-    T_mine = m1/xs_mine
-    T_mine1 = m1/xs_mine1
+def getting_Tf(filename):
     
-    order = np.argsort(T_mine)
-    T_mine = T_mine[order]
-    sv_mine = sv_mine[order]
-    
-    order = np.argsort(T_mine1)
-    T_mine1 = T_mine1[order]
-    sv_mine1 = sv_mine1[order]
-    
+    ## T vs neq
     T_neq, neq = np.loadtxt(neq_file, unpack=True)
+    
+    mask = neq > 0.0
+    T_neq = T_neq[mask]
+    neq = neq[mask]
     
     order = np.argsort(T_neq)
     T_neq = T_neq[order]
     neq = neq[order]
-    neq1 = neq[neq>0]
-    T_neq1 = T_neq[neq>0]
     
-    neq_func = CubicSpline(T_neq, neq)
+    neq_func = lambda x: np.exp(np.interp(np.log(x), np.log(T_neq), np.log(neq)))
     
-    ro_r = (np.pi**2/30.)*dof_func(T_mine)*T_mine**4
+    ## T vs sigmaV
+    xs, sv = np.loadtxt(filename, unpack=True)
+    Ts = m1/xs
+    
+    mask = sv > 0.0
+    Ts = Ts[mask]
+    sv = sv[mask]
+    
+    mask1 = (Ts < np.max(T_neq)) & (Ts > np.min(T_neq))
+    Ts = Ts[mask1]
+    sv = sv[mask1]
+    
+    order = np.argsort(Ts)
+    Ts = Ts[order]
+    sv = sv[order]
+    
+    ## H
+    ro_r = (np.pi**2/30.)*dof_func(Ts)*Ts**4
     H = np.sqrt(ro_r/(3.*Mp**2))
-    zy_mine0 = sv_mine*neq_func(T_mine)
-    func = CubicSpline(T_mine,zy_mine0 - H)
     
-    ro_r1 = (np.pi**2/30.)*dof_func(T_mine1)*T_mine1**4
-    H1 = np.sqrt(ro_r1/(3.*Mp**2))
-    zy_mine01 = sv_mine1*neq_func(T_mine1)
-    func1 = CubicSpline(T_mine1,zy_mine01-H1)
+    ## neq*sigmaV/H = 1
+    z = sv*neq_func(Ts)/H
+    func = lambda x: np.interp(np.log(x), np.log(Ts), np.log(z))
+    Tf = bisect(func, np.min(Ts), np.max(Ts))
+    
+    return Tf
 
-    Tfs = func.roots(extrapolate=False)
-    if Tfs.size != 1:
-        print("TF: HELP")
-    Tf = Tfs[0]
+for card in cards:
+    # print(card)
     
-    Tf1s = func1.roots(extrapolate=False)
-    if Tf1s.size != 1:
-        print("TF1: HELP")
-    Tf1 = Tf1s[0]
+    neq_file = f"./output{my_points}/" + card + "/neq.dat"
+    with open(neq_file) as myfile:
+        m1 = float(myfile.readline().replace('# m1 =',''))
     
-    xf = m1/Tf
-    xf1 = m1/Tf1
+    Tf_mycode = getting_Tf(f"./output{my_points}/"+card+"/TOTALS_T.dat")
+    Tf_micromegas = getting_Tf(f"./micromegas_output/m1T-1_vs_sigmaV{mi_points}/"+card+".dat")
+   
+    xf_mycode = m1/Tf_mycode
+    xf_micromegas = m1/Tf_micromegas
     
     my_masses[card] = m1
-    my_xfs[card] = xf
-    my_xfs1[card] = xf1
+    my_xfs_mycode[card] = xf_mycode
+    my_xfs_micromegas[card] = xf_micromegas
 
 ### Plotting
-plt.scatter([masses[card] for card in cards], [np.abs(1 - my_xfs[card]/xfs[card]) for card in cards], label='micros', alpha=0.5,color='r')
-plt.scatter([masses[card] for card in cards], [np.abs(1 - my_xfs1[card]/xfs[card]) for card in cards], label='mine', alpha=0.5,color='g')
-#plt.scatter([masses[card] for card in cards], [np.abs(1 - my_xfs1[card]/my_xfs[card]) for card in cards], label='mine-vs-micro', alpha=0.5,color='b')
+plt.scatter([masses[card] for card in cards], [np.abs(1 - my_xfs_mycode[card]/xfs[card]) for card in cards], label='micros', alpha=0.5,color='r')
+plt.scatter([masses[card] for card in cards], [np.abs(1 - my_xfs_micromegas[card]/xfs[card]) for card in cards], label='mine', alpha=0.5,color='g')
 plt.legend()
 plt.xscale('log')
 #plt.yscale('log')
-#plt.ylim(0,.1)
+#plt.ylim(0.030,.230)
 plt.xlabel('m1')
-plt.title(f'micromegas {mi_points} vs. mycode {my_points}')
-plt.ylabel('interpolated')
-#plt.savefig(f'./xfs-relerr-mi{mi_points}-my{my_points}-SPLINE.png')
+plt.title(f'micromegas{mi_points} vs. mycode{my_points}')
+#plt.ylabel('interpolated')
+#plt.savefig(f'./xfs-relerr-mi-my-OnlyN1.png')
 plt.show()

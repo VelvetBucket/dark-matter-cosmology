@@ -70,7 +70,7 @@ double sigma(double s){
     p_i = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
     if (p_f < 1e-15 || p_i < 1e-15) return 0.0;
     factor = p_f/(32.0 * M_PI);
-    integral*=factor/(s * p_i);
+    integral*=factor;///(s * p_i);
   }
   return integral;
 }
@@ -135,7 +135,7 @@ double sigma_v(double T){
   const double k2_m1 = bessK2(m1/T);
   
   double lim_inf = 0.0;
-  double lim_sup = 1000.0;//std::numeric_limits<double>::infinity();
+  double lim_sup = 80.0;//std::numeric_limits<double>::infinity();
   
   double error, den, mi, b22, k2_mi, factor_den = 0.0;
   int Err = 1;
@@ -146,21 +146,14 @@ double sigma_v(double T){
       factor_den += mi_gi.second;
     } else {
       k2_mi = bessK2(mi/T);
-      //if (m1/T > 1e+4 || k2_m1 == 0.0 || k2_mi == 0.0) {
-      //  b22 = exp((m1 - mi)/T)*sqrt(m1/mi)*(1 + 1.875*T/mi)/(1 + 1.875*T/m1);
-        //cout << mi/T << " " << m1/T << " " << b22 << "\n"; 
-      //}
-      //else {
-      //  b22 = k2_mi/k2_m1;
-      //};
-      if (mi/T > 10){
+      if (mi/T > 10.0){
         b22 = exp(-(mi - m1)/T) * gsl_sf_bessel_Kn_scaled(2, mi/T)/gsl_sf_bessel_Kn_scaled(2, m1/T);
-      //} else if (mi/T < 0.5){
-      //  b22 = (m1 * m1) / (mi * mi) * (1.0 + (mi/T * mi/T - m1/T * m1/T) / 8.0);
       } else {
         b22 = k2_mi/k2_m1;
       }
-      factor_den += mi_gi.second * pow(mi/m1,2) * b22;
+      if (true) {
+        factor_den += mi_gi.second * pow(mi/m1,2) * b22;
+      }
     }
   }
   
@@ -170,7 +163,8 @@ double sigma_v(double T){
   auto f1 = [T](double t) { return diff_A(t,T); };
   double A = 0.0;
   boost::math::quadrature::tanh_sinh<double> integrator;
-  A = integrator.integrate(f1, lim_inf, lim_sup, 1e-04);
+  //A = integrator.integrate(f1, lim_inf, lim_sup, 1e-04);
+  A = boost::math::quadrature::gauss_kronrod<double, 15>::integrate(f1, lim_inf, lim_sup, 5, 1e-04, &error);
   return A/den;
 }
 
@@ -184,12 +178,13 @@ int main(int argc, char** argv){
   
   const double mi1 = process.getMasses().at(0);
   const double mi2 = process.getMasses().at(1);
-  int N = 5000, Err=1;
-  //double Ti = m1*1e+5, Tf = m1*1e-7 , ui = log(Ti), h=log(Tf/Ti)/(N-1), Tn = Tf;
-  double si=1e+0, sf=1e+12, h = log(sf/si)/(N-1), T= m1*1e+4, zi = log(si), zn;
+  int N = 1000, N_neq = 10*N, Err=1;
+  double Ti = m1*1e+10, Tf = m1*1e-7 , ui = log(Ti), h=log(Tf/Ti)/(N-1), Tn = Tf;
+  double h_neq = log(Tf/Ti)/(N_neq-1);
+  //double si=1e+8, sf=1e+18, h = log(sf/si)/(N-1), T= m1*1e+4, zi = log(si), zn;
   //double ui=1e-1, uf=1e+3, h = log(uf/ui)/(N-1), si=log(ui), T = m1/20.;
-  double Tn, ui, un, sn, sig;
-  
+  double un, sn, sig;
+  h = -0.04;
   //double Tn = m1*1e+01;
   
   if (argc == 3) {
@@ -200,8 +195,8 @@ int main(int argc, char** argv){
     
     myFile << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1  << "\n";
     
-    for(int n = 0; n < 0; n++){
-      un = ui + n*h;
+    for(int n = 0; n < N_neq; n++){
+      un = ui + n*h_neq;
       Tn = std::exp(un);
       neq = 0.0;
       k2_mi = 0.0;
@@ -209,10 +204,12 @@ int main(int argc, char** argv){
         mi = mi_gi.first;
         //cout << mi << " " << mi_gi.second << "\n";
         k2_mi = bessK2(mi/Tn);
-        if (mi/Tn > 1e+4 || k2_mi == 0.0) {
-          k2_mi = sqrt(M_PI*Tn/2*mi)*exp(-mi/Tn)*(1 + 1.875*Tn/mi);
+        if (mi/Tn > 10.0 || k2_mi == 0.0) {
+          k2_mi = exp(-mi/Tn) * gsl_sf_bessel_Kn_scaled(2, mi/Tn);
         } 
-        neq += mi_gi.second * pow(mi,2) * k2_mi;
+        if (true){
+          neq += mi_gi.second * pow(mi,2) * k2_mi;
+        }
       }
       neq *= Tn/(2.0*pow(M_PI,2)); 
       myFile << setiosflags(ios::scientific) << setprecision(8) << Tn << " " << neq  << "\n";
@@ -222,18 +219,10 @@ int main(int argc, char** argv){
   }
   //cout << m1 << "\n";
   for(int n = 0; n < N; n++){
-    zn = zi + n*h;
-    sn = std::exp(zn);
-    /*un = (sqrt(sn) - mi1 - mi2)/T;
-    if (un < 0.0) {
-      sig = 0.0;
-    } else {
-      sig = diff_A(un,T);
-    }*/
-    sig = sigma(sn);
-    cout << setiosflags(ios::scientific) << setprecision(8) << sn << " " << sig  << "\n";
-    //cout << setiosflags(ios::scientific) << setprecision(8) << Tn << " " << sig << "\n";
-    //cout << Err << "\n";
+    un = ui + n*h;
+    Tn = std::exp(un);
+    sig = sigma_v(Tn);
+    cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << sig << "\n";
   }
  
   return 0;
