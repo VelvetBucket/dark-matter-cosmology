@@ -33,4 +33,12 @@ double romberg(double (*f)(double, double), double par, double a, double b, doub
 std::vector<int> findMultiplePeaks(const std::vector<double> arr);
 std::vector<std::pair<int, int>> findPeakWidth(const std::vector<double> data, std::vector<int> peakIndexes);
 
+/* Data loading */
+std::vector<std::vector<double>> data_extractor(std::string filename, int ncols = 2);
+std::vector<std::pair<double,double>> datatable_to_pairs(const std::vector<std::vector<double>> table, int x_col=0, int y_col=1);
+
+/* Interpolation */
+double xlog_ylin_interpolator(std::vector<std::pair<double, double>> points, double x);
+double xlog_ylog_interpolator(std::vector<std::pair<double, double>> points, double x);
+
 #endif 
