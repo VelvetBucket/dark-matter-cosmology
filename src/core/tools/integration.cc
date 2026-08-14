@@ -3,6 +3,15 @@
 using namespace std;
 #define nErrMax 10
 
+// Forward declaration of r_gauss (used internally)
+static void r_gauss( double(*func)(double, double), double par, double a, double b,
+                     double eps, double * aEps, double * ans, double * aAns,
+                     int* N, int depth, int * err);
+
+static void r_simpson(  double(*func)(double, double),double par,double * f,double a,
+                        double b, double eps, double * aEps, double * ans, double * aAns,
+                        double _f_ , int depth, int depth1, int*nErr);
+
 static double const X2[2]={2.113249E-01,7.886751E-01 };
 static double const F2[2]={5.000000E-01,5.000000E-01 };
 static double const X3[3]={1.127017E-01,5.000000E-01 ,8.872983E-01 };

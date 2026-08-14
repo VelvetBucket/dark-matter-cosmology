@@ -1,127 +1,227 @@
 #!/bin/bash
 
-# Defining foldere variables
-mg5_output_folder="../DM_test"
-working_folder=$(pwd)
+# This file is configured by CMake
+# FOLDER is the base MadGraph5 directory (e.g., /path/to/MG5)
+MG5_BASE_DIR="@FOLDER@"
 
-# copying lib and src folders to working directory
-cp -Tfr "$mg5_output_folder/src" "$working_folder/src" 
-cp -Tfr "$mg5_output_folder/lib" "$working_folder/lib" 
+# Get the working directory (where this script is run from)
+WORKING_FOLDER=$(pwd)
+
+# Check if output folder name was provided as argument
+if [ $# -eq 0 ]; then
+    echo "ERROR: Please specify the MadGraph5 output folder name"
+    echo ""
+    echo "Usage: $0 <output_folder_name>"
+    echo ""
+    echo "Example: $0 DM_test"
+    echo "This will use: $MG5_BASE_DIR/DM_test"
+    echo ""
+    echo "Available folders in $MG5_BASE_DIR:"
+    ls -d "$MG5_BASE_DIR"/*/ 2>/dev/null | xargs -n 1 basename
+    exit 1
+fi
+
+MG5_OUTPUT_NAME="$1"
+MG5_OUTPUT_FOLDER="$MG5_BASE_DIR/$MG5_OUTPUT_NAME"
+
+echo "========================================"
+echo "OVERSEER: Starting MadGraph5 workflow"
+echo "========================================"
+echo "MadGraph5 base directory: $MG5_BASE_DIR"
+echo "Output folder name: $MG5_OUTPUT_NAME"
+echo "Full path: $MG5_OUTPUT_FOLDER"
+echo "Working directory: $WORKING_FOLDER"
+echo "========================================"
+
+# Validate MadGraph5 folder
+if [ ! -d "$MG5_OUTPUT_FOLDER" ]; then
+    echo "ERROR: MadGraph5 output folder does not exist: $MG5_OUTPUT_FOLDER"
+    echo ""
+    echo "Available folders in $MG5_BASE_DIR:"
+    ls -d "$MG5_BASE_DIR"/*/ 2>/dev/null | xargs -n 1 basename
+    exit 1
+fi
+
+if [ ! -d "$MG5_OUTPUT_FOLDER/SubProcesses" ]; then
+    echo "ERROR: $MG5_OUTPUT_FOLDER/SubProcesses not found!"
+    echo "This doesn't look like a valid MadGraph5 output folder."
+    exit 1
+fi
+
+# Check if we're in the project root
+if [ ! -f "CMakeLists.txt" ] && [ ! -f "Makefile" ]; then
+    echo "ERROR: Not in project root directory!"
+    echo "Please run this script from the dark-matter-cosmology root folder."
+    exit 1
+fi
+
+# Copy lib and src folders from MadGraph5 output to working directory
+echo "OVERSEER: Copying from MadGraph5 output folder..."
+if [ -d "$MG5_OUTPUT_FOLDER/src" ]; then
+    cp -Tfr "$MG5_OUTPUT_FOLDER/src" "$WORKING_FOLDER/src/core/model"
+    echo "  ✓ Copied model sources to src/core/model/"
+else
+    echo "ERROR: $MG5_OUTPUT_FOLDER/src not found!"
+    exit 1
+fi
+
+if [ -d "$MG5_OUTPUT_FOLDER/lib" ]; then
+    cp -Tfr "$MG5_OUTPUT_FOLDER/lib" "$WORKING_FOLDER/external/lib"
+    echo "  ✓ Copied libraries to external/lib/"
+else
+    echo "WARNING: $MG5_OUTPUT_FOLDER/lib not found"
+fi
 
 wait
 
-# Editing the src files
-#sed -i -e 's/    std::cout << "Opened slha file " /    \/\/std::cout << "Opened slha file " /g' "$working_folder/src/read_slha.cc"
-#sed -i -e 's/ if(verbose)/ \/\/if(verbose)/g' "$working_folder/src/read_slha.cc"
+# Build the model library (was: make -s -C "./src")
+echo "OVERSEER: Building model library..."
+make model
 
-#wait
+# Wait for model library to build
+wait
 
-# Run make 
-make -s -C "./src"
-
-# extracting subprocess folders name 
-cd "$mg5_output_folder/SubProcesses"
+# Extracting subprocess folders name
+echo "OVERSEER: Finding subprocesses..."
+cd "$MG5_OUTPUT_FOLDER/SubProcesses" || exit 1
 unfiltered_processes=($(ls -d */))
 
-particle_file="$working_folder/allowed_particles.txt"
+particle_file="$WORKING_FOLDER/allowed_particles.txt"
 if [[ -s $particle_file ]]; then
-    	echo "OVERSEER: Particles file exists."
-    	mapfile -t particles < $particle_file
-    	#echo "${particles[@]}"
+    echo "OVERSEER: Particles file exists: $particle_file"
+    mapfile -t particles < "$particle_file"
     
-	subprocess_folders=()
-	for process in "${unfiltered_processes[@]}"; do
-		for in1 in "${particles[@]}"; do
-			for in2 in "${particles[@]}"; do
-				if [[ "$process" == *"_$in1$in2_"* ]]; then
-					#echo $process
-					subprocess_folders+=("$process")
-		    			break 2
-				fi
-			done
-	    	done
-	done
+    subprocess_folders=()
+    for process in "${unfiltered_processes[@]}"; do
+        for in1 in "${particles[@]}"; do
+            for in2 in "${particles[@]}"; do
+                if [[ "$process" == *"_$in1$in2_"* ]]; then
+                    subprocess_folders+=("$process")
+                    break 2
+                fi
+            done
+        done
+    done
 else
-	echo "OVERSEER: Particles file does not exist. Running all processes."
-	subprocess_folders=("${unfiltered_processes[@]}")
+    echo "OVERSEER: Particles file does not exist. Running all processes."
+    subprocess_folders=("${unfiltered_processes[@]}")
 fi
 
-## Moving back to working directory
-cd "$working_folder"
+# Moving back to working directory
+cd "$WORKING_FOLDER" || exit 1
 
 i=1
 sp_number=${#subprocess_folders[@]}
-
 echo "OVERSEER: Processes to evaluate: $sp_number"
 
 # Running over each subprocess
-for sp_folder in "${subprocess_folders[@]}"
-do
-	# Removing "/" to name the files
-	sp_folder="${sp_folder%/*}"
-	
-	# Moving the CPPProcess files
-	cp "$mg5_output_folder/SubProcesses/$sp_folder/CPPProcess.cc" "$working_folder/process/"
-	cp "$mg5_output_folder/SubProcesses/$sp_folder/CPPProcess.h" "$working_folder/process/"
-	
-	# Editing the CPPProcess files
-	#sed -i -e 's/void CPPProcess::sigmaKin()/double CPPProcess::sigmaKin(double s, double theta)/g' "$working_folder/process/CPPProcess.cc"
-	#sed -i -e 's/    matrix_element\[i\] \/\= denominators\[i\]\;/    matrix_element\[i\] \/\= denominators\[i\]\;\n  return matrix_element\[0\]\*std::sin(theta)\;/g' "$working_folder/process/CPPProcess.cc"
-	#sed -i -e 's/pars->print/\/\/pars->print/g' "$working_folder/process/CPPProcess.cc"
-	# sed -i -e 's/\/\/ Calculate all amplitudes/for (auto* ptr \: p) \{\n    delete ptr\;\n  \}\n  p\.clear()\;/g' "$working_folder/process/CPPProcess.cc"
-	
-	#sed -i -e 's/void sigmaKin()/double sigmaKin(double s, double theta)/g' "$working_folder/process/CPPProcess.h"
-	wait
-	# Run make
-	make -s check
-	
-	# Run over param_cards
-	param_cards=($(ls "./cards/"))
-	
-	for card in "${param_cards[@]}"
-	do
-		card0="${card%.*}"
-		mkdir -p "./output/$card0/"
-		
-		# Running the check
-		if [[ $i -eq 1 ]];
-		then
-			command=$(./check "./cards/$card" "./output/$card0/neq.dat")
-		else
-			command=$(./check "./cards/$card")
-		fi
-		
-		#Creating output file and saving data 
-		#echo "$card"
-		#free -m | awk 'NR==2{printf "Memory Usage: %s/%sMB (%.2f%%)\n", $3,$2,$3*100/$2 }'
-		echo "$command" > "./output/$card0/$sp_folder.dat"
-		wait
-		unset command
-	done
-
-	# Print the number of completed processes
-	echo "Subprocess $i of $sp_number completed"
-	let "i++"
+for sp_folder in "${subprocess_folders[@]}"; do
+    # Removing "/" to name the files
+    sp_folder="${sp_folder%/}"
+    
+    echo ""
+    echo "========================================"
+    echo "OVERSEER: Processing $sp_folder ($i of $sp_number)"
+    echo "========================================"
+    
+    # Moving the CPPProcess files to process/ directory
+    if [ -f "$MG5_OUTPUT_FOLDER/SubProcesses/$sp_folder/CPPProcess.cc" ]; then
+        cp "$MG5_OUTPUT_FOLDER/SubProcesses/$sp_folder/CPPProcess.cc" "$WORKING_FOLDER/process/"
+        cp "$MG5_OUTPUT_FOLDER/SubProcesses/$sp_folder/CPPProcess.h" "$WORKING_FOLDER/process/"
+        echo "  ✓ Copied CPPProcess files to process/"
+    else
+        echo "ERROR: CPPProcess files not found for $sp_folder!"
+        continue
+    fi
+    
+    wait
+    
+    # Rebuild sigmav executable (was: make -s sigmav)
+    echo "OVERSEER: Rebuilding sigmav executable..."
+    make force-sigmav
+    
+    # Check if rebuild succeeded
+    if [ ! -f "./build/bin/sigmav" ]; then
+        echo "ERROR: sigmav executable not found after rebuild!"
+        exit 1
+    fi
+    echo "  ✓ sigmav executable rebuilt successfully"
+    
+    # Run over param_cards (using data/cards/ directory)
+    param_cards=($(ls "./data/cards/" 2>/dev/null))
+    
+    if [ ${#param_cards[@]} -eq 0 ]; then
+        echo "WARNING: No parameter cards found in ./data/cards/"
+        continue
+    fi
+    
+    echo "OVERSEER: Running sigmav with ${#param_cards[@]} parameter card(s)..."
+    
+    for card in "${param_cards[@]}"; do
+        card0="${card%.*}"
+        mkdir -p "./output/$card0/"
+        
+        echo "  - Processing card: $card"
+        
+        # Running the check
+        if [[ $i -eq 1 ]]; then
+            # First process: create neq.dat
+            command_output=$(./build/bin/sigmav "./data/cards/$card" "./output/$card0/neq.dat")
+        else
+            command_output=$(./build/bin/sigmav "./data/cards/$card")
+        fi
+        
+        # Creating output file and saving data
+        echo "$command_output" > "./output/$card0/$sp_folder.dat"
+        wait
+        unset command_output
+    done
+    
+    # Print the number of completed processes
+    echo "OVERSEER: Subprocess $i of $sp_number completed"
+    let "i++"
 done
 
-output_folders=($(ls -d ./output/*))
-for out_folder in "${output_folders[@]}"
-do
-	out_files=$(ls $out_folder/P*.dat)
-	totals=$(sort -g $out_files | datamash -W --format=%.8e groupby 1 sum 2 )
-	echo "$totals" > "$out_folder/TOTALS_T.dat"
-done
+# Process outputs (totals)
+echo ""
+echo "========================================"
+echo "OVERSEER: Calculating totals..."
+echo "========================================"
 
-for out_folder in "${output_folders[@]}"
-do
-	out_files=$(ls $out_folder/P*n1n1*.dat)
-	totals=$(sort -g $out_files | datamash -W --format=%.8e groupby 1 sum 2 )
-	echo "$totals" > "$out_folder/TOTALS_n1.dat"
-done
+output_folders=($(ls -d ./output/*/ 2>/dev/null))
 
-for out_folder in "${output_folders[@]}"
-do
-	out_files=$(ls $out_folder/P*etretr*.dat)
-	totals=$(sort -g $out_files | datamash -W --format=%.8e groupby 1 sum 2 )
-	echo "$totals" > "$out_folder/TOTALS_etr.dat"
-done
+if [ ${#output_folders[@]} -eq 0 ]; then
+    echo "WARNING: No output folders found in ./output/"
+else
+    for out_folder in "${output_folders[@]}"; do
+        echo "Processing: $out_folder"
+        
+        # Check if datamash is available
+        if command -v datamash &> /dev/null; then
+            out_files=$(ls "$out_folder"/*.dat 2>/dev/null)
+            if [ -n "$out_files" ]; then
+                # Total T
+                totals=$(sort -g $out_files | datamash -W --format=%.8e groupby 1 sum 2 2>/dev/null)
+                if [ -n "$totals" ]; then
+                    echo "$totals" > "$out_folder/TOTALS_T.dat"
+                    echo "  ✓ Created TOTALS_T.dat"
+                fi
+            fi
+        else
+            echo "  ⚠ WARNING: datamash not found. Skipping totals calculation."
+            echo "  Install datamash: sudo apt-get install datamash (Ubuntu/Debian)"
+        fi
+    done
+fi
+
+echo ""
+echo "========================================"
+echo "OVERSEER: Completed successfully!"
+echo "========================================"
+echo "Outputs saved in ./output/"
+echo ""
+echo "Summary:"
+echo "  - MadGraph5 output folder: $MG5_OUTPUT_FOLDER"
+echo "  - Total subprocesses processed: $sp_number"
+echo "  - Output folders: ${#output_folders[@]}"
+echo "========================================"
