@@ -20,6 +20,8 @@ double bessI0(double  x)
 	return ans;
 }
 
+static double bessI1(double x);
+
 static double bessI1(double x)
 {
 	double ax,ans;

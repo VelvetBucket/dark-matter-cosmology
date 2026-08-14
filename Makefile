@@ -1,63 +1,91 @@
-LIBDIR=./lib
-INCDIR=./src
-MODELLIB=model_scotogenic_UFO
-CXXFLAGS= -Ofast -I$(INCDIR) -I.
-LIBFLAGS= -L$(LIBDIR) -l$(MODELLIB)
+# Root Makefile - delegates to CMake build system
+# FOLDER should point to the base MadGraph5 directory
 
-objects = ./main.o ./process/CPPProcess.o ./process/momenta.o ./tools/integration.o ./tools/bessel.o
+BUILD_DIR ?= build
+FOLDER ?= $(error Please set FOLDER: make FOLDER=/path/to/MadGraph5_base)
+CMAKE_OPTS ?= -DCMAKE_BUILD_TYPE=Release
 
-interp_objs = ./interp.o ./tools/data_handling.o ./tools/interpolation.o
+# Default target - builds everything
+all: check evolution interp
+	@echo "All executables built successfully!"
 
-evolution_objs = ./evolution.o ./tools/data_handling.o ./tools/interpolation.o
+# Build the model library (matching original make -C src)
+model:
+	@mkdir -p $(BUILD_DIR)
+	@if [ ! -f $(BUILD_DIR)/CMakeCache.txt ]; then \
+		echo "First time build, configuring..."; \
+		cd $(BUILD_DIR) && cmake .. -DFOLDER=$(FOLDER) $(CMAKE_OPTS); \
+	fi
+	@$(MAKE) -C $(BUILD_DIR) model_scotogenic_UFO
 
-## Getting N evolution
-evolution: $(evolution_objs)
-	$(CXX) $(CXXFLAGS) -g -o $@ $(evolution_objs)
-	
-./evolution.o: ./evolution.cpp  ./tools/tools.h 
-	$(CXX) -c $(CXXFLAGS) -g -o $@ $<
+# Build check (normal)
+check:
+	@mkdir -p $(BUILD_DIR)
+	@if [ ! -f $(BUILD_DIR)/CMakeCache.txt ]; then \
+		echo "First time build, configuring..."; \
+		cd $(BUILD_DIR) && cmake .. -DFOLDER=$(FOLDER) $(CMAKE_OPTS); \
+	fi
+	@$(MAKE) -C $(BUILD_DIR) check
 
-## Getting a-T-Hubble table
-interp: $(interp_objs)
-	$(CXX) $(CXXFLAGS) -g -o $@ $(interp_objs)
+# Force rebuild check (when process/ files change)
+force-check:
+	@echo "Force rebuilding check (process files changed)..."
+	@rm -rf $(BUILD_DIR)/CMakeCache.txt $(BUILD_DIR)/CMakeFiles
+	@mkdir -p $(BUILD_DIR)
+	@cd $(BUILD_DIR) && cmake .. -DFOLDER=$(FOLDER) $(CMAKE_OPTS)
+	@$(MAKE) -C $(BUILD_DIR) check
 
-./interp.o: ./interp.cpp  ./tools/tools.h 
-	$(CXX) -c $(CXXFLAGS) -g -o $@ $<
+# Build evolution
+evolution:
+	@mkdir -p $(BUILD_DIR)
+	@if [ ! -f $(BUILD_DIR)/CMakeCache.txt ]; then \
+		echo "First time build, configuring..."; \
+		cd $(BUILD_DIR) && cmake .. -DFOLDER=$(FOLDER) $(CMAKE_OPTS); \
+	fi
+	@$(MAKE) -C $(BUILD_DIR) evolution
 
-## Getting sigma*v
-check: $(objects) $(LIBDIR)/lib$(MODELLIB).a
-	$(CXX) $(CXXFLAGS) -g -o $@ $(objects) $(LIBFLAGS) -lgsl -lgslcblas -lm
+# Build interp
+interp:
+	@mkdir -p $(BUILD_DIR)
+	@if [ ! -f $(BUILD_DIR)/CMakeCache.txt ]; then \
+		echo "First time build, configuring..."; \
+		cd $(BUILD_DIR) && cmake .. -DFOLDER=$(FOLDER) $(CMAKE_OPTS); \
+	fi
+	@$(MAKE) -C $(BUILD_DIR) interp
 
-$(LIBDIR)/lib$(MODELLIB).a: $(INCDIR)/HelAmps_scotogenic_UFO.cc  $(INCDIR)/Parameters_scotogenic_UFO.cc $(INCDIR)/rambo.cc $(INCDIR)/read_slha.cc $(INCDIR)/HelAmps_scotogenic_UFO.h  $(INCDIR)/Parameters_scotogenic_UFO.h $(INCDIR)/rambo.h $(INCDIR)/read_slha.h
-	make -C $(INCDIR)
-
-./main.o: ./main.cpp ./process/CPPProcess.h ./process/momenta.h ./tools/tools.h 
-	$(CXX) -c $(CXXFLAGS) -g -o $@ $<
-	
-./process/CPPProcess.o: ./process/CPPProcess.cc ./process/CPPProcess.h .FORCE
-	$(CXX) -c $(CXXFLAGS) -g -o $@ $< $(LIBFLAGS)
-	
-./process/momenta.o: ./process/momenta.cc ./process/momenta.h
-	$(CXX) -c $(CXXFLAGS) -g -o $@ $<
-
-./tools/integration.o: ./tools/integration.cc ./tools/tools.h
-	$(CXX) -c $(CXXFLAGS) -g -o $@ $< 
-	
-./tools/bessel.o: ./tools/bessel.cc ./tools/tools.h
-	$(CXX) -c $(CXXFLAGS) -g -o $@ $<
-
-./tools/interpolation.o: ./tools/interpolation.cc ./tools/tools.h
-	$(CXX) -c $(CXXFLAGS) -g -o $@ $< 
-	
-./tools/data_handling.o: ./tools/data_handling.cc ./tools/tools.h
-	$(CXX) -c $(CXXFLAGS) -g -o $@ $< 
-
-.PHONY: clean .FORCE
-
-.FORCE:
-
+# Clean
 clean:
-	rm -f main.o
-	rm -f check 
-	rm -f $(objects)
+	@rm -rf $(BUILD_DIR)
+	@echo "Cleaned"
 
+# Deep clean (remove everything including generated files)
+distclean: clean
+	@rm -rf output/*
+	@rm -f process/*.cc process/*.h
+	@echo "Deep cleaned"
+
+# Help
+help:
+	@echo "========================================"
+	@echo "Available targets:"
+	@echo "========================================"
+	@echo "  all          - Build everything"
+	@echo "  model        - Build model library only"
+	@echo "  check        - Build check (reuses existing build)"
+	@echo "  force-check  - Force rebuild check (use when process/ files change)"
+	@echo "  evolution    - Build evolution"
+	@echo "  interp       - Build interp"
+	@echo "  clean        - Clean build directory"
+	@echo "  distclean    - Deep clean (removes output and process files)"
+	@echo "  help         - Show this help"
+	@echo ""
+	@echo "Required: FOLDER=/absolute/path/to/MadGraph5_base_directory"
+	@echo "Example: make FOLDER=/home/user/MG5 check"
+	@echo ""
+	@echo "For overseer.sh workflow:"
+	@echo "  ./scripts/overseer.sh <output_folder_name>"
+	@echo "  Example: ./scripts/overseer.sh DM_test"
+	@echo "  This will use: /home/user/MG5/DM_test"
+	@echo "========================================"
+
+.PHONY: all model check force-check evolution interp clean distclean help
