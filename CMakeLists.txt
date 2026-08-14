@@ -103,11 +103,11 @@ target_include_directories(core_lib PUBLIC
 target_link_libraries(core_lib ${MODELLIB})
 
 # ----------------------------
-# check executable - REBUILT when process/ changes
+# sigmav executable - REBUILT when process/ changes
 # ----------------------------
-add_executable(check src/main/sigmav.cpp)
-target_link_libraries(check core_lib gsl gslcblas m)
-add_dependencies(check core_lib)
+add_executable(sigmav src/main/sigmav.cpp)
+target_link_libraries(sigmav core_lib gsl gslcblas m)
+add_dependencies(sigmav core_lib)
 
 # ----------------------------
 # evolution and interp - INDEPENDENT
@@ -121,7 +121,7 @@ target_link_libraries(interp core_lib)
 # ----------------------------
 # Output Directories
 # ----------------------------
-set_target_properties(check evolution interp PROPERTIES
+set_target_properties(sigmav evolution interp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -160,7 +160,7 @@ message(STATUS "MadGraph5 base directory: ${FOLDER}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "========================================")
 message(STATUS "Executables:")
-message(STATUS "  - check     : sigma*v calculation (rebuild when process/ changes)")
+message(STATUS "  - sigmav     : sigma*v calculation (rebuild when process/ changes)")
 message(STATUS "  - evolution : Evolution calculation")
 message(STATUS "  - interp    : Interpolation calculation")
 message(STATUS "========================================")
