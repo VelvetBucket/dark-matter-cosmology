@@ -1,0 +1,33 @@
+# Build directories
+build/
+bin/
+lib/
+*.a
+*.so
+*.dylib
+
+# Compiled files
+*.o
+*.exe
+*.out
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CMakeUserPresets.json
+
+# But we want to keep the root Makefile
+# So we explicitly un-ignore the root Makefile
+!Makefile
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files (if large)
+*.root
+*.hdf5
