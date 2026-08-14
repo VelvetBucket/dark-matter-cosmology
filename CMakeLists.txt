@@ -21,6 +21,75 @@ message(STATUS "When running overseer.sh, specify the output folder name")
 message(STATUS "Example: ./scripts/overseer.sh DM_test")
 # --- END REQUIRED FOLDER ---
 
+# Set the required MadGraph5 version
+set(REQUIRED_MG5_VERSION "3.6.7")
+message(STATUS "Required MadGraph5 version: ${REQUIRED_MG5_VERSION} (exact match required)")
+
+# Read version from VERSION file
+if(EXISTS "${FOLDER}/VERSION")
+    # Read file line by line
+    file(STRINGS "${FOLDER}/VERSION" MG5_VERSION_LINES)
+    
+    set(MG5_VERSION "")
+    set(MG5_VERSION_DATE "")
+    
+    foreach(LINE ${MG5_VERSION_LINES})
+        # Check for version line
+        if(LINE MATCHES "^[ \t]*version[ \t]*=")
+            # Extract the version number
+            string(REGEX REPLACE "^[ \t]*version[ \t]*=[ \t]*" "" MG5_VERSION "${LINE}")
+            message(STATUS "Found MadGraph5 version: ${MG5_VERSION}")
+        endif()
+        
+        # Check for date line
+        if(LINE MATCHES "^[ \t]*date[ \t]*=")
+            # Extract the date
+            string(REGEX REPLACE "^[ \t]*date[ \t]*=[ \t]*" "" MG5_VERSION_DATE "${LINE}")
+            message(STATUS "MadGraph5 build date: ${MG5_VERSION_DATE}")
+        endif()
+    endforeach()
+    
+    # Validate version was found
+    if(NOT MG5_VERSION)
+        message(FATAL_ERROR 
+            "\n========================================\n"
+            "ERROR: Could not find version in VERSION file!\n"
+            "========================================\n"
+            "File content:\n"
+            "${MG5_VERSION_LINES}\n"
+            "Please check that the VERSION file has a line: version = X.X.X\n"
+            "========================================\n"
+        )
+    endif()
+    
+    # Check for EXACT version match only
+    if(NOT MG5_VERSION VERSION_EQUAL REQUIRED_MG5_VERSION)
+        message(FATAL_ERROR 
+            "\n========================================\n"
+            "ERROR: MadGraph5 version mismatch!\n"
+            "========================================\n"
+            "Found version:    ${MG5_VERSION}\n"
+            "Required version: ${REQUIRED_MG5_VERSION} (exact match required)\n"
+            "Found at:         ${FOLDER}\n"
+            "\n"
+            "This project requires exactly MadGraph5 ${REQUIRED_MG5_VERSION}.\n"
+            "Please use the correct version and try again.\n"
+            "========================================\n"
+        )
+    else()
+        message(STATUS "✅ MadGraph5 version ${MG5_VERSION} matches required version (${REQUIRED_MG5_VERSION})")
+    endif()
+else()
+    message(FATAL_ERROR 
+        "\n========================================\n"
+        "ERROR: VERSION file not found in ${FOLDER}!\n"
+        "========================================\n"
+        "This does not appear to be a valid MadGraph5 installation.\n"
+        "Expected ${FOLDER}/VERSION to exist.\n"
+        "========================================\n"
+    )
+endif()
+
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
