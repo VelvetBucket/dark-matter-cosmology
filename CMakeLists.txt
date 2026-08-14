@@ -1,7 +1,12 @@
+# ============================================
+# CMake minimum version and project name
+# ============================================
 cmake_minimum_required(VERSION 3.10)
 project(dark_matter_cosmology VERSION 1.0.0 LANGUAGES CXX)
 
-# --- REQUIRED FOLDER VARIABLE (Base MadGraph5 directory) ---
+# ============================================
+# REQUIRED FOLDER VARIABLE (Base MadGraph5 directory)
+# ============================================
 set(FOLDER "" CACHE PATH "Absolute path to the base MadGraph5 directory (e.g., /path/to/MG5)")
 if(NOT FOLDER)
     message(FATAL_ERROR 
@@ -17,52 +22,38 @@ if(NOT EXISTS "${FOLDER}")
 endif()
 
 message(STATUS "Using MadGraph5 base directory: ${FOLDER}")
-message(STATUS "When running overseer.sh, specify the output folder name")
-message(STATUS "Example: ./scripts/overseer.sh DM_test")
-# --- END REQUIRED FOLDER ---
 
-# Set the required MadGraph5 version
+# ============================================
+# MadGraph5 Version Check (EXACT MATCH REQUIRED)
+# ============================================
 set(REQUIRED_MG5_VERSION "3.6.7")
 message(STATUS "Required MadGraph5 version: ${REQUIRED_MG5_VERSION} (exact match required)")
 
 # Read version from VERSION file
 if(EXISTS "${FOLDER}/VERSION")
-    # Read file line by line
     file(STRINGS "${FOLDER}/VERSION" MG5_VERSION_LINES)
     
     set(MG5_VERSION "")
     set(MG5_VERSION_DATE "")
     
     foreach(LINE ${MG5_VERSION_LINES})
-        # Check for version line
         if(LINE MATCHES "^[ \t]*version[ \t]*=")
-            # Extract the version number
             string(REGEX REPLACE "^[ \t]*version[ \t]*=[ \t]*" "" MG5_VERSION "${LINE}")
             message(STATUS "Found MadGraph5 version: ${MG5_VERSION}")
         endif()
-        
-        # Check for date line
         if(LINE MATCHES "^[ \t]*date[ \t]*=")
-            # Extract the date
             string(REGEX REPLACE "^[ \t]*date[ \t]*=[ \t]*" "" MG5_VERSION_DATE "${LINE}")
             message(STATUS "MadGraph5 build date: ${MG5_VERSION_DATE}")
         endif()
     endforeach()
     
-    # Validate version was found
     if(NOT MG5_VERSION)
         message(FATAL_ERROR 
-            "\n========================================\n"
-            "ERROR: Could not find version in VERSION file!\n"
-            "========================================\n"
-            "File content:\n"
-            "${MG5_VERSION_LINES}\n"
-            "Please check that the VERSION file has a line: version = X.X.X\n"
-            "========================================\n"
+            "Could not find version in VERSION file!\n"
+            "Please check that the VERSION file has a line: version = X.X.X"
         )
     endif()
     
-    # Check for EXACT version match only
     if(NOT MG5_VERSION VERSION_EQUAL REQUIRED_MG5_VERSION)
         message(FATAL_ERROR 
             "\n========================================\n"
@@ -73,130 +64,213 @@ if(EXISTS "${FOLDER}/VERSION")
             "Found at:         ${FOLDER}\n"
             "\n"
             "This project requires exactly MadGraph5 ${REQUIRED_MG5_VERSION}.\n"
-            "Please use the correct version and try again.\n"
             "========================================\n"
         )
     else()
         message(STATUS "✅ MadGraph5 version ${MG5_VERSION} matches required version (${REQUIRED_MG5_VERSION})")
     endif()
 else()
-    message(FATAL_ERROR 
-        "\n========================================\n"
-        "ERROR: VERSION file not found in ${FOLDER}!\n"
-        "========================================\n"
-        "This does not appear to be a valid MadGraph5 installation.\n"
-        "Expected ${FOLDER}/VERSION to exist.\n"
-        "========================================\n"
-    )
+    message(FATAL_ERROR "VERSION file not found in ${FOLDER}")
 endif()
 
-# Set C++ standard
+# ============================================
+# C++ Standard Settings
+# ============================================
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 add_definitions(-D_USE_MATH_DEFINES)
 
-# Compiler flags
+# ============================================
+# Compiler Flags
+# ============================================
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Ofast -g")
 if(NOT MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
-    
-    # Suppress common warnings in generated code
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-parameter")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-but-set-variable")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-function")
-    
-    # Suppress misleading indentation warnings
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-misleading-indentation")
-    
-    # Suppress multi-line comment warnings
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-comment")
-    
 endif()
 
-# Set directories
-set(LIBDIR ${CMAKE_CURRENT_SOURCE_DIR}/external/lib)
+# ============================================
+# Directories in the BUILD tree
+# ============================================
+set(DATA_DIR ${CMAKE_CURRENT_BINARY_DIR}/data)
+set(SCRIPTS_DIR ${CMAKE_CURRENT_BINARY_DIR}/scripts)
+set(MODEL_DIR ${CMAKE_CURRENT_BINARY_DIR}/model)
+set(LIB_DIR ${CMAKE_CURRENT_BINARY_DIR}/lib)
+set(PROCESS_DIR ${CMAKE_CURRENT_BINARY_DIR}/process)
+set(CARDS_DIR ${DATA_DIR}/cards)
+set(DATATABLES_DIR ${DATA_DIR}/datatables)
+
+# Create directories
+file(MAKE_DIRECTORY ${MODEL_DIR})
+file(MAKE_DIRECTORY ${LIB_DIR})
+file(MAKE_DIRECTORY ${PROCESS_DIR})
+file(MAKE_DIRECTORY ${DATA_DIR})
+file(MAKE_DIRECTORY ${CARDS_DIR})
+file(MAKE_DIRECTORY ${DATATABLES_DIR})
+file(MAKE_DIRECTORY ${SCRIPTS_DIR})
+
+# ============================================
+# Copy TEMPLATE files from source to build
+# These will be overwritten by overseer.sh at runtime
+# ============================================
+message(STATUS "Copying template files to build directory...")
+
+# Copy template model files
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/templates/model)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/templates/model
+         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+    message(STATUS "  - Copied template model files to ${MODEL_DIR}")
+else()
+    message(WARNING "No template model files found in templates/model/")
+endif()
+
+# Copy template process files
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/templates/process)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/templates/process
+         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+    message(STATUS "  - Copied template process files to ${PROCESS_DIR}")
+else()
+    message(WARNING "No template process files found in templates/process/")
+endif()
+
+# Copy template library files
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/templates/lib)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/templates/lib
+         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+    message(STATUS "  - Copied template library files to ${LIB_DIR}")
+else()
+    message(WARNING "No template library files found in templates/lib/")
+endif()
+
+# ============================================
+# Copy data files to build directory
+# ============================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/data/cards)
+    file(GLOB CARD_FILES "${CMAKE_CURRENT_SOURCE_DIR}/data/cards/*.dat")
+    foreach(FILE ${CARD_FILES})
+        get_filename_component(FILENAME ${FILE} NAME)
+        configure_file(${FILE} ${CARDS_DIR}/${FILENAME} COPYONLY)
+    endforeach()
+    message(STATUS "Copied parameter cards to ${CARDS_DIR}")
+else()
+    message(WARNING "No cards found in ${CMAKE_CURRENT_SOURCE_DIR}/data/cards")
+endif()
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/data/datatables)
+    file(GLOB DATATABLE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/data/datatables/*.txt")
+    foreach(FILE ${DATATABLE_FILES})
+        get_filename_component(FILENAME ${FILE} NAME)
+        configure_file(${FILE} ${DATATABLES_DIR}/${FILENAME} COPYONLY)
+    endforeach()
+    message(STATUS "Copied datatables to ${DATATABLES_DIR}")
+else()
+    message(WARNING "No datatables found in ${CMAKE_CURRENT_SOURCE_DIR}/data/datatables")
+endif()
+
+# ============================================
+# Copy scripts to build directory
+# ============================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template
+         DESTINATION ${SCRIPTS_DIR})
+    message(STATUS "Copied modify_template to ${SCRIPTS_DIR}/modify_template")
+else()
+    message(WARNING "No modify_template found in ${CMAKE_CURRENT_SOURCE_DIR}/scripts")
+endif()
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/utilities)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/scripts/utilities
+         DESTINATION ${SCRIPTS_DIR})
+    message(STATUS "Copied utilities to ${SCRIPTS_DIR}/utilities")
+endif()
+
+# ============================================
+# Model Library (from templates in build directory)
+# ============================================
 set(MODELLIB model_scotogenic_UFO)
-
-# Include directories
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/model
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/process
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/tools
-    ${CMAKE_CURRENT_SOURCE_DIR}/process           # CPPProcess files copied here
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-# Link directories
-link_directories(${LIBDIR})
-
-# ----------------------------
-# Model Library (from MadGraph5)
-# ----------------------------
 set(MODEL_SOURCES
-    src/core/model/HelAmps_scotogenic_UFO.cc
-    src/core/model/Parameters_scotogenic_UFO.cc
-    src/core/model/rambo.cc
-    src/core/model/read_slha.cc
+    ${MODEL_DIR}/HelAmps_scotogenic_UFO.cc
+    ${MODEL_DIR}/Parameters_scotogenic_UFO.cc
+    ${MODEL_DIR}/rambo.cc
+    ${MODEL_DIR}/read_slha.cc
 )
 
 add_library(${MODELLIB} STATIC ${MODEL_SOURCES})
-target_include_directories(${MODELLIB} PUBLIC src/core/model)
-set_target_properties(${MODELLIB} PROPERTIES
-    ARCHIVE_OUTPUT_DIRECTORY ${LIBDIR}
-)
+target_include_directories(${MODELLIB} PUBLIC ${MODEL_DIR})
+target_compile_options(${MODELLIB} PRIVATE -w)
 
-# ----------------------------
-# Core Library (your tools + process)
-# ----------------------------
+# ============================================
+# Core Library (your tools + process from build directory)
+# ============================================
 set(CORE_SOURCES
-    # Process files (copied from MadGraph5 by overseer.sh)
-    process/CPPProcess.cc
-    src/core/process/momenta.cc
-    # Your tools
-    src/core/tools/integration.cc
-    src/core/tools/bessel.cc
-    src/core/tools/data_handling.cc
-    src/core/tools/interpolation.cc
+    ${PROCESS_DIR}/CPPProcess.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/process/momenta.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/tools/integration.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/tools/bessel.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/tools/data_handling.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/tools/interpolation.cc
 )
 
 add_library(core_lib STATIC ${CORE_SOURCES})
 target_include_directories(core_lib PUBLIC 
-    src/core
-    src/core/process
-    src/core/tools
-    process                         # For CPPProcess.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/process
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/tools
+    ${PROCESS_DIR}
 )
 target_link_libraries(core_lib ${MODELLIB})
 
-# ----------------------------
-# sigmav executable - REBUILT when process/ changes
-# ----------------------------
-add_executable(sigmav src/main/sigmav.cpp)
+# ============================================
+# Set output directories for both libraries
+# ============================================
+set_target_properties(${MODELLIB} core_lib PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY ${LIB_DIR}
+)
+
+# ============================================
+# Include directories (source + build)
+# ============================================
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/process
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/tools
+    ${PROCESS_DIR}
+    ${MODEL_DIR}
+    ${DATA_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+link_directories(${LIB_DIR})
+
+# ============================================
+# Executables
+# ============================================
+add_executable(sigmav ${CMAKE_CURRENT_SOURCE_DIR}/src/main/sigmav.cpp)
 target_link_libraries(sigmav core_lib gsl gslcblas m)
 add_dependencies(sigmav core_lib)
 
-# ----------------------------
-# evolution and interp - INDEPENDENT
-# ----------------------------
-add_executable(evolution src/main/evolution.cpp)
+add_executable(evolution ${CMAKE_CURRENT_SOURCE_DIR}/src/main/evolution.cpp)
 target_link_libraries(evolution core_lib)
 
-add_executable(interp src/main/interp.cpp)
+add_executable(interp ${CMAKE_CURRENT_SOURCE_DIR}/src/main/interp.cpp)
 target_link_libraries(interp core_lib)
 
-# ----------------------------
-# Output Directories
-# ----------------------------
+# ============================================
+# Output Directories for executables
+# ============================================
 set_target_properties(sigmav evolution interp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
-# ----------------------------
-# Configure overseer.sh with FOLDER
-# ----------------------------
+# ============================================
+# Configure overseer.sh for build directory
+# ============================================
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/overseer.sh.in
     ${CMAKE_CURRENT_BINARY_DIR}/overseer.sh
@@ -209,32 +283,58 @@ file(CHMOD ${CMAKE_CURRENT_BINARY_DIR}/overseer.sh
     WORLD_READ WORLD_EXECUTE
 )
 
-# ----------------------------
-# Copy the script to root for convenience
-# ----------------------------
-add_custom_target(install_overseer
-    COMMAND ${CMAKE_COMMAND} -E copy
-        ${CMAKE_CURRENT_BINARY_DIR}/overseer.sh
-        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/overseer.sh
-    COMMENT "Installing overseer.sh to scripts directory"
+# ============================================
+# Convenience targets
+# ============================================
+add_custom_target(run
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/overseer.sh DM_test
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running overseer.sh with default DM_test"
+    USES_TERMINAL
 )
 
-# ----------------------------
+add_custom_target(list_mg5
+    COMMAND ls -d ${FOLDER}/*/ 2>/dev/null | xargs -n 1 basename
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Available MadGraph5 output folders:"
+    USES_TERMINAL
+)
+
+# ============================================
+# Install target (optional)
+# ============================================
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin/
+    DESTINATION bin
+    USE_SOURCE_PERMISSIONS
+)
+
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/scripts/
+    DESTINATION share/dark_matter/scripts
+    USE_SOURCE_PERMISSIONS
+)
+
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/data/
+    DESTINATION share/dark_matter/data
+    USE_SOURCE_PERMISSIONS
+)
+
+# ============================================
 # Status Messages
-# ----------------------------
+# ============================================
 message(STATUS "")
 message(STATUS "========================================")
 message(STATUS "Project: ${PROJECT_NAME}")
 message(STATUS "MadGraph5 base directory: ${FOLDER}")
-message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "MadGraph5 version: ${MG5_VERSION}")
+message(STATUS "Build directory: ${CMAKE_CURRENT_BINARY_DIR}")
 message(STATUS "========================================")
-message(STATUS "Executables:")
-message(STATUS "  - sigmav     : sigma*v calculation (rebuild when process/ changes)")
-message(STATUS "  - evolution : Evolution calculation")
-message(STATUS "  - interp    : Interpolation calculation")
+message(STATUS "Files in build directory:")
+message(STATUS "  - Data files:      ${DATA_DIR} (from source data/)")
+message(STATUS "  - Scripts:         ${SCRIPTS_DIR} (from source scripts/)")
+message(STATUS "  - Model files:     ${MODEL_DIR} (templates from templates/model/)")
+message(STATUS "  - Process files:   ${PROCESS_DIR} (templates from templates/process/)")
+message(STATUS "  - Libraries:       ${LIB_DIR} (templates from templates/lib/)")
 message(STATUS "========================================")
-message(STATUS "Usage:")
-message(STATUS "  ./scripts/overseer.sh <output_folder>")
-message(STATUS "  Example: ./scripts/overseer.sh DM_test")
-message(STATUS "  This will use: ${FOLDER}/DM_test")
+message(STATUS "Note: Templates will be overwritten by")
+message(STATUS "      ./overseer.sh DM_test")
 message(STATUS "========================================")
