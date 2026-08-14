@@ -105,7 +105,7 @@ target_link_libraries(core_lib ${MODELLIB})
 # ----------------------------
 # check executable - REBUILT when process/ changes
 # ----------------------------
-add_executable(check src/main/main-v.cpp)
+add_executable(check src/main/sigmav.cpp)
 target_link_libraries(check core_lib gsl gslcblas m)
 add_dependencies(check core_lib)
 
