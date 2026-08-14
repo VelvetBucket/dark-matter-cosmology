@@ -46,7 +46,7 @@ Example:
 cmake .. -DFOLDER=/home/user/MadGraph5/MG5_aMC_v3_6_7
 ```
 
-Note: Your MadGraph5 version must match exactly 3.6.7. CMake will check the VERSION file in your MadGraph5 directory and fail if the version doesn't match.
+> **Note:** Your MadGraph5 version must match exactly 3.6.7. CMake will check the VERSION file in your MadGraph5 directory and fail if the version doesn't match.
 
 ### 2. Build the Project
 
