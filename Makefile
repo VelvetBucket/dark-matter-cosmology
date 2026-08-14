@@ -6,7 +6,7 @@ FOLDER ?= $(error Please set FOLDER: make FOLDER=/path/to/MadGraph5_base)
 CMAKE_OPTS ?= -DCMAKE_BUILD_TYPE=Release
 
 # Default target - builds everything
-all: check evolution interp
+all: sigmav evolution interp
 	@echo "All executables built successfully!"
 
 # Build the model library (matching original make -C src)
@@ -18,22 +18,22 @@ model:
 	fi
 	@$(MAKE) -C $(BUILD_DIR) model_scotogenic_UFO
 
-# Build check (normal)
-check:
+# Build sigmav (normal)
+sigmav:
 	@mkdir -p $(BUILD_DIR)
 	@if [ ! -f $(BUILD_DIR)/CMakeCache.txt ]; then \
 		echo "First time build, configuring..."; \
 		cd $(BUILD_DIR) && cmake .. -DFOLDER=$(FOLDER) $(CMAKE_OPTS); \
 	fi
-	@$(MAKE) -C $(BUILD_DIR) check
+	@$(MAKE) -C $(BUILD_DIR) sigmav
 
-# Force rebuild check (when process/ files change)
-force-check:
-	@echo "Force rebuilding check (process files changed)..."
+# Force rebuild sigmav (when process/ files change)
+force-sigmav:
+	@echo "Force rebuilding sigmav (process files changed)..."
 	@rm -rf $(BUILD_DIR)/CMakeCache.txt $(BUILD_DIR)/CMakeFiles
 	@mkdir -p $(BUILD_DIR)
 	@cd $(BUILD_DIR) && cmake .. -DFOLDER=$(FOLDER) $(CMAKE_OPTS)
-	@$(MAKE) -C $(BUILD_DIR) check
+	@$(MAKE) -C $(BUILD_DIR) sigmav
 
 # Build evolution
 evolution:
@@ -71,8 +71,8 @@ help:
 	@echo "========================================"
 	@echo "  all          - Build everything"
 	@echo "  model        - Build model library only"
-	@echo "  check        - Build check (reuses existing build)"
-	@echo "  force-check  - Force rebuild check (use when process/ files change)"
+	@echo "  sigmav       - Build sigmav (reuses existing build)"
+	@echo "  force-sigmav - Force rebuild sigmav (use when process/ files change)"
 	@echo "  evolution    - Build evolution"
 	@echo "  interp       - Build interp"
 	@echo "  clean        - Clean build directory"
@@ -80,7 +80,7 @@ help:
 	@echo "  help         - Show this help"
 	@echo ""
 	@echo "Required: FOLDER=/absolute/path/to/MadGraph5_base_directory"
-	@echo "Example: make FOLDER=/home/user/MG5 check"
+	@echo "Example: make FOLDER=/home/user/MG5 sigmav"
 	@echo ""
 	@echo "For overseer.sh workflow:"
 	@echo "  ./scripts/overseer.sh <output_folder_name>"
@@ -88,4 +88,4 @@ help:
 	@echo "  This will use: /home/user/MG5/DM_test"
 	@echo "========================================"
 
-.PHONY: all model check force-check evolution interp clean distclean help
+.PHONY: all model sigmav force-sigmav evolution interp clean distclean help

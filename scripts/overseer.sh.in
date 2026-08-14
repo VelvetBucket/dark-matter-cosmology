@@ -136,16 +136,16 @@ for sp_folder in "${subprocess_folders[@]}"; do
     
     wait
     
-    # Rebuild check executable (was: make -s check)
-    echo "OVERSEER: Rebuilding check executable..."
-    make force-check
+    # Rebuild sigmav executable (was: make -s sigmav)
+    echo "OVERSEER: Rebuilding sigmav executable..."
+    make force-sigmav
     
     # Check if rebuild succeeded
-    if [ ! -f "./build/bin/check" ]; then
-        echo "ERROR: check executable not found after rebuild!"
+    if [ ! -f "./build/bin/sigmav" ]; then
+        echo "ERROR: sigmav executable not found after rebuild!"
         exit 1
     fi
-    echo "  ✓ check executable rebuilt successfully"
+    echo "  ✓ sigmav executable rebuilt successfully"
     
     # Run over param_cards (using data/cards/ directory)
     param_cards=($(ls "./data/cards/" 2>/dev/null))
@@ -155,7 +155,7 @@ for sp_folder in "${subprocess_folders[@]}"; do
         continue
     fi
     
-    echo "OVERSEER: Running check with ${#param_cards[@]} parameter card(s)..."
+    echo "OVERSEER: Running sigmav with ${#param_cards[@]} parameter card(s)..."
     
     for card in "${param_cards[@]}"; do
         card0="${card%.*}"
@@ -166,9 +166,9 @@ for sp_folder in "${subprocess_folders[@]}"; do
         # Running the check
         if [[ $i -eq 1 ]]; then
             # First process: create neq.dat
-            command_output=$(./build/bin/check "./data/cards/$card" "./output/$card0/neq.dat")
+            command_output=$(./build/bin/sigmav "./data/cards/$card" "./output/$card0/neq.dat")
         else
-            command_output=$(./build/bin/check "./data/cards/$card")
+            command_output=$(./build/bin/sigmav "./data/cards/$card")
         fi
         
         # Creating output file and saving data
