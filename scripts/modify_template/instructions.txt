@@ -1,3 +1,22 @@
-This script must be in the same location as the template_files folder :)
+Run the script by providing the path to the template_files directory.
 
-madgraph/iolibs/template_files
+Example:
+
+./modify_templates.sh MG5_aMC_v3_6_7/madgraph/iolibs/template_files/
+
+The script will:
+
+Rename the original template_files directory to template_filesOG.
+Create a new template_files directory as a copy of template_filesOG.
+Apply all required modifications only to the new template_files.
+Keep template_filesOG unchanged as a backup of the original files.
+
+After execution:
+
+MG5_aMC_v3_6_7/madgraph/ioliobs/
+├── template_files/ # modified files
+└── template_filesOG/ # original files
+
+If template_filesOG already exists, the script will stop without modifying anything :)
+
+
