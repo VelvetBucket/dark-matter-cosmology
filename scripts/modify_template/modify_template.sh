@@ -3,35 +3,42 @@
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
+    printf '%s\n' "Usage: ./modify_templates.sh /path/to/template_files" >&2
     exit 1
 fi
 
 template_dir="${1%/}"
 original_dir="${template_dir}OG"
 
+
 if [ ! -d "$template_dir" ]; then
+    printf '%s\n' "template_files directory not found. No changes were made." >&2
     exit 1
 fi
+
 
 if [ -e "$original_dir" ]; then
+    printf '%s\n' "template_filesOG already exists. No changes were made." >&2
     exit 1
 fi
+
 
 if ! command -v patch >/dev/null 2>&1; then
+    printf '%s\n' "The 'patch' command is required. No changes were made." >&2
     exit 1
 fi
 
-# Move the untouched original directory to template_filesOG.
-mv "$template_dir" "$original_dir"
 
-# Create a new template_files directory as an exact copy of template_filesOG.
-if ! cp -a "$original_dir" "$template_dir"; then
-    mv "$original_dir" "$template_dir"
-    exit 1
-fi
+apply_template_patch() {
 
-# Apply all known modifications only to the new template_files directory.
-if ! patch -d "$template_dir" -p0 --batch --forward --no-backup-if-mismatch >/dev/null 2>&1 <<'PATCH_END'
+    patch \
+        -d "$template_dir" \
+        -p0 \
+        --batch \
+        --silent \
+        --no-backup-if-mismatch \
+        "$@" <<'PATCH_END'
+
 --- b_sf_xxx_splitorders_fks.inc
 +++ b_sf_xxx_splitorders_fks.inc
 @@ -225,11 +225,10 @@
@@ -590,20 +597,75 @@ if ! patch -d "$template_dir" -p0 --batch --forward --no-backup-if-mismatch >/de
        nc = int(jamp2(0))
        is_LC = .true.
        maxcolor=0
+
 PATCH_END
-then
-    rm -rf "$template_dir"
+}
+
+
+# Check whether the directory is still in the expected original state.
+if apply_template_patch --dry-run --forward >/dev/null 2>&1; then
+
+    template_state="original"
+
+# If the reverse patch works, the modifications are already present.
+elif apply_template_patch --dry-run --reverse >/dev/null 2>&1; then
+
+    printf '%s\n' \
+        "template_files is already modified. No changes were made." >&2
+    exit 1
+
+else
+
+    printf '%s\n' \
+        "template_files does not match the expected original version. No changes were made." >&2
+    exit 1
+
+fi
+
+
+# Move the untouched original directory to template_filesOG.
+mv "$template_dir" "$original_dir"
+
+
+# Create a new template_files directory from the original.
+if ! cp -a "$original_dir" "$template_dir"; then
+
     mv "$original_dir" "$template_dir"
+
     exit 1
 fi
 
-# Ensure cpp_process_h.inc ends with exactly one final newline.
-cpp_header="$template_dir/cpp_process_h.inc"
-last_byte="$(tail -c 1 "$cpp_header" | od -An -t x1 | tr -d '[:space:]')"
 
-if [ "$last_byte" != "0a" ]; then
-    printf '\n' >> "$cpp_header"
+# Apply the modifications only to the new template_files directory.
+if ! apply_template_patch --forward >/dev/null 2>&1; then
+
+    rm -rf "$template_dir"
+    mv "$original_dir" "$template_dir"
+
+    printf '%s\n' \
+        "Failed to modify template_files. The original directory was restored." >&2
+
+    exit 1
 fi
+
+
+# Match the expected final newline in cpp_process_h.inc.
+cpp_header="$template_dir/cpp_process_h.inc"
+
+if [ -f "$cpp_header" ]; then
+
+    last_byte="$(
+        tail -c 1 "$cpp_header" |
+        od -An -t x1 |
+        tr -d '[:space:]'
+    )"
+
+    if [ "$last_byte" != "0a" ]; then
+        printf '\n' >> "$cpp_header"
+    fi
+
+fi
+
 
 printf '%s\n' \
     "template_files modified successfully. Old template_files moved to template_filesOG."
