@@ -93,7 +93,6 @@ endif()
 if(EXISTS "${MODIFY_TEMPLATE_SCRIPT}" AND EXISTS "${MG5_TEMPLATE_DIR}")
     message(STATUS "Running modify_template.sh with template directory: ${MG5_TEMPLATE_DIR}")
     
-    # Run the script and capture ALL output
     execute_process(
         COMMAND /bin/bash "${MODIFY_TEMPLATE_SCRIPT}" "${MG5_TEMPLATE_DIR}"
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -104,44 +103,21 @@ if(EXISTS "${MODIFY_TEMPLATE_SCRIPT}" AND EXISTS "${MG5_TEMPLATE_DIR}")
         ERROR_STRIP_TRAILING_WHITESPACE
     )
     
-    # Show output if there is any
     if(MODIFY_TEMPLATE_OUTPUT)
-        message(STATUS "modify_template.sh stdout: ${MODIFY_TEMPLATE_OUTPUT}")
-    else()
-        message(STATUS "modify_template.sh produced no stdout (this is OK if it's a silent script)")
+        message(STATUS "modify_template.sh output: ${MODIFY_TEMPLATE_OUTPUT}")
     endif()
     
-    if(MODIFY_TEMPLATE_ERROR)
-        message(STATUS "modify_template.sh stderr: ${MODIFY_TEMPLATE_ERROR}")
-    endif()
-    
-    # Check the result
     if(MODIFY_TEMPLATE_RESULT EQUAL 0)
-        message(STATUS "✅ modify_template.sh completed successfully (exit code: ${MODIFY_TEMPLATE_RESULT})")
-        
-        # Check if files were actually created/modified
-        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/templates/model/HelAmps_scotogenic_UFO.cc" OR 
-           EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/templates/process/CPPProcess.cc" OR
-           EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/templates/lib/libmodel_scotogenic_UFO.a")
-            message(STATUS "✅ Template files appear to have been generated")
-        else()
-            message(WARNING "⚠️  No template files found after running modify_template.sh")
-            message(WARNING "  Check that the script is copying files to the correct locations")
-            message(WARNING "  Expected templates in: templates/model/, templates/process/, templates/lib/")
-        endif()
+        message(STATUS "✅ modify_template.sh completed successfully")
     else()
         message(WARNING "modify_template.sh failed with error code: ${MODIFY_TEMPLATE_RESULT}")
-        message(WARNING "  If the script is silent (no output), this might be due to:")
-        message(WARNING "    - The script cannot find source files")
-        message(WARNING "    - The script cannot write to the destination")
-        message(WARNING "    - A command inside the script is failing")
-        message(WARNING "")
+        if(MODIFY_TEMPLATE_ERROR)
+            message(WARNING "  Error: ${MODIFY_TEMPLATE_ERROR}")
+        endif()
         message(WARNING "  To debug, run manually:")
-        message(WARNING "    cd ${CMAKE_CURRENT_SOURCE_DIR}")
-        message(WARNING "    ./scripts/modify_template.sh ${MG5_TEMPLATE_DIR}")
-        message(WARNING "    echo \"Exit code: \$?\"")
+        message(WARNING "  cd ${CMAKE_CURRENT_SOURCE_DIR}")
+        message(WARNING "  ./scripts/modify_template.sh ${MG5_TEMPLATE_DIR}")
     endif()
-    
 else()
     if(NOT EXISTS "${MODIFY_TEMPLATE_SCRIPT}")
         message(WARNING "modify_template.sh not found at: ${MODIFY_TEMPLATE_SCRIPT}")
@@ -149,7 +125,6 @@ else()
     if(NOT EXISTS "${MG5_TEMPLATE_DIR}")
         message(WARNING "MadGraph5 template directory not found: ${MG5_TEMPLATE_DIR}")
         message(WARNING "  Expected path: ${FOLDER}/madgraph/iolibs/template_files")
-        message(WARNING "  Check that your MadGraph5 installation has this directory")
     endif()
     message(WARNING "Skipping modify_template.sh execution")
 endif()
@@ -177,13 +152,13 @@ if(NOT MSVC)
 endif()
 
 # ============================================
-# Define data directory paths for executables AND Kerrigan.sh
+# Define data directory paths for executables
 # ============================================
 set(DATA_DIR "${CMAKE_CURRENT_BINARY_DIR}/data")
 set(CARDS_DIR "${DATA_DIR}/cards")
 set(DATATABLES_DIR "${DATA_DIR}/datatables")
+set(UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/UI")
 
-# Pass to C++ executables
 add_definitions(-DDATA_DIR="${DATA_DIR}")
 add_definitions(-DCARDS_DIR="${CARDS_DIR}")
 add_definitions(-DDATATABLES_DIR="${DATATABLES_DIR}")
@@ -192,6 +167,7 @@ message(STATUS "Data directory definitions:")
 message(STATUS "  - DATA_DIR: ${DATA_DIR}")
 message(STATUS "  - CARDS_DIR: ${CARDS_DIR}")
 message(STATUS "  - DATATABLES_DIR: ${DATATABLES_DIR}")
+message(STATUS "  - UI_DIR: ${UI_DIR}")
 
 # ============================================
 # Directories in the BUILD tree
@@ -200,6 +176,7 @@ set(SCRIPTS_DIR ${CMAKE_CURRENT_BINARY_DIR}/scripts)
 set(MODEL_DIR ${CMAKE_CURRENT_BINARY_DIR}/model)
 set(LIB_DIR ${CMAKE_CURRENT_BINARY_DIR}/lib)
 set(PROCESS_DIR ${CMAKE_CURRENT_BINARY_DIR}/process)
+set(BUILD_UI_DIR ${CMAKE_CURRENT_BINARY_DIR}/UI)
 
 # Create directories
 file(MAKE_DIRECTORY ${MODEL_DIR})
@@ -209,6 +186,30 @@ file(MAKE_DIRECTORY ${DATA_DIR})
 file(MAKE_DIRECTORY ${CARDS_DIR})
 file(MAKE_DIRECTORY ${DATATABLES_DIR})
 file(MAKE_DIRECTORY ${SCRIPTS_DIR})
+file(MAKE_DIRECTORY ${BUILD_UI_DIR})
+
+# ============================================
+# Copy UI files to build directory
+# ============================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/UI)
+    # Copy all Python files
+    file(GLOB UI_PY_FILES "${CMAKE_CURRENT_SOURCE_DIR}/UI/*.py")
+    foreach(FILE ${UI_PY_FILES})
+        get_filename_component(FILENAME ${FILE} NAME)
+        configure_file(${FILE} ${BUILD_UI_DIR}/${FILENAME} COPYONLY)
+    endforeach()
+    message(STATUS "Copied UI Python files to ${BUILD_UI_DIR}")
+    
+    # Copy any other UI files (JSON, etc.)
+    file(GLOB UI_OTHER_FILES "${CMAKE_CURRENT_SOURCE_DIR}/UI/*.json" "${CMAKE_CURRENT_SOURCE_DIR}/UI/*.txt")
+    foreach(FILE ${UI_OTHER_FILES})
+        get_filename_component(FILENAME ${FILE} NAME)
+        configure_file(${FILE} ${BUILD_UI_DIR}/${FILENAME} COPYONLY)
+    endforeach()
+    message(STATUS "Copied UI data files to ${BUILD_UI_DIR}")
+else()
+    message(WARNING "UI directory not found at ${CMAKE_CURRENT_SOURCE_DIR}/UI")
+endif()
 
 # ============================================
 # Copy TEMPLATE files from source to build
@@ -270,12 +271,10 @@ endif()
 # ============================================
 # Copy scripts to build directory
 # ============================================
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template.sh)
-    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template.sh
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template
          DESTINATION ${SCRIPTS_DIR})
-    message(STATUS "Copied modify_template.sh to ${SCRIPTS_DIR}/modify_template.sh")
-else()
-    message(WARNING "No modify_template.sh found in ${CMAKE_CURRENT_SOURCE_DIR}/scripts")
+    message(STATUS "Copied modify_template to ${SCRIPTS_DIR}/modify_template")
 endif()
 
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/utilities)
@@ -400,8 +399,43 @@ file(CHMOD ${CMAKE_CURRENT_BINARY_DIR}/scripts/Kerrigan.sh
 )
 
 # ============================================
+# Create wrapper script to run UI.py from build directory
+# ============================================
+set(UI_WRAPPER ${CMAKE_CURRENT_BINARY_DIR}/run_ui)
+
+# Create the wrapper script content
+file(WRITE ${UI_WRAPPER} "#!/usr/bin/env bash\n")
+file(APPEND ${UI_WRAPPER} "# Wrapper script to run UI.py from the build directory\n")
+file(APPEND ${UI_WRAPPER} "# Generated by CMake\n\n")
+file(APPEND ${UI_WRAPPER} "# Set environment variables for the UI\n")
+file(APPEND ${UI_WRAPPER} "export DATA_DIR=\"${DATA_DIR}\"\n")
+file(APPEND ${UI_WRAPPER} "export CARDS_DIR=\"${CARDS_DIR}\"\n")
+file(APPEND ${UI_WRAPPER} "export DATATABLES_DIR=\"${DATATABLES_DIR}\"\n")
+file(APPEND ${UI_WRAPPER} "export BUILD_DIR=\"${CMAKE_CURRENT_BINARY_DIR}\"\n")
+file(APPEND ${UI_WRAPPER} "export MG5_BASE_DIR=\"${FOLDER}\"\n\n")
+file(APPEND ${UI_WRAPPER} "# Run the UI\n")
+file(APPEND ${UI_WRAPPER} "cd \"${CMAKE_CURRENT_BINARY_DIR}\"\n")
+file(APPEND ${UI_WRAPPER} "python3 \"${BUILD_UI_DIR}/UI.py\" \"\$@\"\n")
+
+# Make the wrapper executable
+file(CHMOD ${UI_WRAPPER}
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+    GROUP_READ GROUP_EXECUTE
+    WORLD_READ WORLD_EXECUTE
+)
+
+message(STATUS "Created UI wrapper script: ${UI_WRAPPER}")
+
+# ============================================
 # Convenience targets
 # ============================================
+add_custom_target(ui
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/run_ui
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running UI.py"
+    USES_TERMINAL
+)
+
 add_custom_target(run
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/scripts/Kerrigan.sh DM_test
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
@@ -417,7 +451,7 @@ add_custom_target(list_mg5
 )
 
 # ============================================
-# Install target (optional)
+# Install target
 # ============================================
 install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin/
     DESTINATION bin
@@ -434,6 +468,16 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/data/
     USE_SOURCE_PERMISSIONS
 )
 
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/UI/
+    DESTINATION share/dark_matter/UI
+    USE_SOURCE_PERMISSIONS
+)
+
+install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/run_ui
+    DESTINATION bin
+    RENAME dark_matter_ui
+)
+
 # ============================================
 # Status Messages
 # ============================================
@@ -445,11 +489,26 @@ message(STATUS "MadGraph5 version: ${MG5_VERSION}")
 message(STATUS "Build directory: ${CMAKE_CURRENT_BINARY_DIR}")
 message(STATUS "========================================")
 message(STATUS "Files in build directory:")
-message(STATUS "  - Data files:      ${DATA_DIR} (from source data/)")
-message(STATUS "  - Scripts:         ${SCRIPTS_DIR} (from source scripts/)")
-message(STATUS "  - Model files:     ${MODEL_DIR} (templates from templates/model/)")
-message(STATUS "  - Process files:   ${PROCESS_DIR} (templates from templates/process/)")
-message(STATUS "  - Libraries:       ${LIB_DIR} (templates from templates/lib/)")
+message(STATUS "  - Data files:      ${DATA_DIR}")
+message(STATUS "  - Scripts:         ${SCRIPTS_DIR}")
+message(STATUS "  - UI:              ${BUILD_UI_DIR}")
+message(STATUS "  - Model files:     ${MODEL_DIR} (templates)")
+message(STATUS "  - Process files:   ${PROCESS_DIR} (templates)")
+message(STATUS "  - Libraries:       ${LIB_DIR} (templates)")
 message(STATUS "========================================")
-message(STATUS "Note: Templates will be overwritten by")
-message(STATUS "      ./scripts/Kerrigan.sh DM_test")
+message(STATUS "Executables:")
+message(STATUS "  - sigmav     : ${CMAKE_BINARY_DIR}/bin/sigmav")
+message(STATUS "  - evolution  : ${CMAKE_BINARY_DIR}/bin/evolution")
+message(STATUS "  - interp     : ${CMAKE_BINARY_DIR}/bin/interp")
+message(STATUS "========================================")
+message(STATUS "Usage:")
+message(STATUS "  # Run the UI (main interface)")
+message(STATUS "  cd ${CMAKE_CURRENT_BINARY_DIR}")
+message(STATUS "  ./run_ui")
+message(STATUS "  # Or use the make target:")
+message(STATUS "  make ui")
+message(STATUS "")
+message(STATUS "  # Run Kerrigan.sh workflow")
+message(STATUS "  ./scripts/Kerrigan.sh DM_test")
+message(STATUS "  make run")
+message(STATUS "========================================")
