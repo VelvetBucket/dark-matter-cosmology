@@ -74,6 +74,87 @@ else()
 endif()
 
 # ============================================
+# Run modify_template.sh to prepare template files
+# ============================================
+set(MODIFY_TEMPLATE_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template.sh)
+set(MG5_TEMPLATE_DIR "${FOLDER}/madgraph/iolibs/template_files")
+
+# Make sure the script is executable
+if(EXISTS "${MODIFY_TEMPLATE_SCRIPT}")
+    execute_process(
+        COMMAND chmod +x "${MODIFY_TEMPLATE_SCRIPT}"
+        RESULT_VARIABLE CHMOD_RESULT
+    )
+    if(CHMOD_RESULT EQUAL 0)
+        message(STATUS "✅ Made modify_template.sh executable")
+    endif()
+endif()
+
+if(EXISTS "${MODIFY_TEMPLATE_SCRIPT}" AND EXISTS "${MG5_TEMPLATE_DIR}")
+    message(STATUS "Running modify_template.sh with template directory: ${MG5_TEMPLATE_DIR}")
+    
+    # Run the script and capture ALL output
+    execute_process(
+        COMMAND /bin/bash "${MODIFY_TEMPLATE_SCRIPT}" "${MG5_TEMPLATE_DIR}"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        RESULT_VARIABLE MODIFY_TEMPLATE_RESULT
+        OUTPUT_VARIABLE MODIFY_TEMPLATE_OUTPUT
+        ERROR_VARIABLE MODIFY_TEMPLATE_ERROR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_STRIP_TRAILING_WHITESPACE
+    )
+    
+    # Show output if there is any
+    if(MODIFY_TEMPLATE_OUTPUT)
+        message(STATUS "modify_template.sh stdout: ${MODIFY_TEMPLATE_OUTPUT}")
+    else()
+        message(STATUS "modify_template.sh produced no stdout (this is OK if it's a silent script)")
+    endif()
+    
+    if(MODIFY_TEMPLATE_ERROR)
+        message(STATUS "modify_template.sh stderr: ${MODIFY_TEMPLATE_ERROR}")
+    endif()
+    
+    # Check the result
+    if(MODIFY_TEMPLATE_RESULT EQUAL 0)
+        message(STATUS "✅ modify_template.sh completed successfully (exit code: ${MODIFY_TEMPLATE_RESULT})")
+        
+        # Check if files were actually created/modified
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/templates/model/HelAmps_scotogenic_UFO.cc" OR 
+           EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/templates/process/CPPProcess.cc" OR
+           EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/templates/lib/libmodel_scotogenic_UFO.a")
+            message(STATUS "✅ Template files appear to have been generated")
+        else()
+            message(WARNING "⚠️  No template files found after running modify_template.sh")
+            message(WARNING "  Check that the script is copying files to the correct locations")
+            message(WARNING "  Expected templates in: templates/model/, templates/process/, templates/lib/")
+        endif()
+    else()
+        message(WARNING "modify_template.sh failed with error code: ${MODIFY_TEMPLATE_RESULT}")
+        message(WARNING "  If the script is silent (no output), this might be due to:")
+        message(WARNING "    - The script cannot find source files")
+        message(WARNING "    - The script cannot write to the destination")
+        message(WARNING "    - A command inside the script is failing")
+        message(WARNING "")
+        message(WARNING "  To debug, run manually:")
+        message(WARNING "    cd ${CMAKE_CURRENT_SOURCE_DIR}")
+        message(WARNING "    ./scripts/modify_template.sh ${MG5_TEMPLATE_DIR}")
+        message(WARNING "    echo \"Exit code: \$?\"")
+    endif()
+    
+else()
+    if(NOT EXISTS "${MODIFY_TEMPLATE_SCRIPT}")
+        message(WARNING "modify_template.sh not found at: ${MODIFY_TEMPLATE_SCRIPT}")
+    endif()
+    if(NOT EXISTS "${MG5_TEMPLATE_DIR}")
+        message(WARNING "MadGraph5 template directory not found: ${MG5_TEMPLATE_DIR}")
+        message(WARNING "  Expected path: ${FOLDER}/madgraph/iolibs/template_files")
+        message(WARNING "  Check that your MadGraph5 installation has this directory")
+    endif()
+    message(WARNING "Skipping modify_template.sh execution")
+endif()
+
+# ============================================
 # C++ Standard Settings
 # ============================================
 set(CMAKE_CXX_STANDARD 14)
@@ -189,12 +270,12 @@ endif()
 # ============================================
 # Copy scripts to build directory
 # ============================================
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template)
-    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template.sh)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template.sh
          DESTINATION ${SCRIPTS_DIR})
-    message(STATUS "Copied modify_template to ${SCRIPTS_DIR}/modify_template")
+    message(STATUS "Copied modify_template.sh to ${SCRIPTS_DIR}/modify_template.sh")
 else()
-    message(WARNING "No modify_template found in ${CMAKE_CURRENT_SOURCE_DIR}/scripts")
+    message(WARNING "No modify_template.sh found in ${CMAKE_CURRENT_SOURCE_DIR}/scripts")
 endif()
 
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/utilities)
@@ -372,4 +453,3 @@ message(STATUS "  - Libraries:       ${LIB_DIR} (templates from templates/lib/)"
 message(STATUS "========================================")
 message(STATUS "Note: Templates will be overwritten by")
 message(STATUS "      ./scripts/Kerrigan.sh DM_test")
-message(STATUS "========================================")
