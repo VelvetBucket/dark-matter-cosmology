@@ -11,7 +11,7 @@ using namespace std;
 
 int main(int argc, char** argv){
   
-  string dofeff_file = "./std_thg.txt";
+  string dofeff_file = DATATABLES_DIR "/std_thg.txt";
   vector<vector<double>> dofeff_table = data_extractor(dofeff_file,3);
   //Remove T = 0 GeV
   dofeff_table.erase(remove_if(dofeff_table.begin(), dofeff_table.end(), [](vector<double> val) { return val[0] <= 0.0; }), dofeff_table.end());

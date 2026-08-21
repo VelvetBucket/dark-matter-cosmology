@@ -13,8 +13,9 @@ if [ ! -d "$template_dir" ]; then
     exit 1
 fi
 
-if [ -e "$original_dir" ]; then
-    exit 1
+if [ -d "$original_dir" ]; then
+    printf '%s\n' "template_files is already modified. No changes were made."
+    exit 0
 fi
 
 if ! command -v patch >/dev/null 2>&1; then
