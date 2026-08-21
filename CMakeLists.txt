@@ -308,15 +308,15 @@ set_target_properties(sigmav evolution interp PROPERTIES
 )
 
 # ============================================
-# Configure overseer.sh for build directory
+# Configure Kerrigan.sh for build directory
 # ============================================
 configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/overseer.sh.in
-    ${CMAKE_CURRENT_BINARY_DIR}/overseer.sh
+    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/Kerrigan.sh.in
+    ${CMAKE_CURRENT_BINARY_DIR}/scripts/Kerrigan.sh
     @ONLY
 )
 
-file(CHMOD ${CMAKE_CURRENT_BINARY_DIR}/overseer.sh
+file(CHMOD ${CMAKE_CURRENT_BINARY_DIR}/scripts/Kerrigan.sh
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
     GROUP_READ GROUP_EXECUTE
     WORLD_READ WORLD_EXECUTE
@@ -326,9 +326,9 @@ file(CHMOD ${CMAKE_CURRENT_BINARY_DIR}/overseer.sh
 # Convenience targets
 # ============================================
 add_custom_target(run
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/overseer.sh DM_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/scripts/Kerrigan.sh DM_test
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Running overseer.sh with default DM_test"
+    COMMENT "Running Kerrigan.sh with default DM_test"
     USES_TERMINAL
 )
 
@@ -375,5 +375,5 @@ message(STATUS "  - Process files:   ${PROCESS_DIR} (templates from templates/pr
 message(STATUS "  - Libraries:       ${LIB_DIR} (templates from templates/lib/)")
 message(STATUS "========================================")
 message(STATUS "Note: Templates will be overwritten by")
-message(STATUS "      ./overseer.sh DM_test")
+message(STATUS "      ./scripts/Kerrigan.sh DM_test")
 message(STATUS "========================================")

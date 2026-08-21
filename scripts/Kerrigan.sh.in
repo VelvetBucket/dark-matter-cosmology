@@ -71,7 +71,8 @@ fi
 MG5_BASE_DIR="$(cd -- "$MG5_BASE_DIR" && pwd)"
 
 DATA_DIR="$BUILD_DIR/data"
-CARDS_DIR="$DATA_DIR/cards"
+CARDS_DIR_DEFAULT="$DATA_DIR/cards"
+CARDS_DIR="$CARDS_DIR_DEFAULT"
 PROCESS_DIR="$BUILD_DIR/process"
 MODEL_DIR="$BUILD_DIR/model"
 LIB_DIR="$BUILD_DIR/lib"
@@ -86,6 +87,7 @@ export PATH="$BIN_DIR:$PATH"
 # ------------------------------------------------------------------------------
 
 CARD_SPEC=""
+CARDS_DIR_INPUT="${KERRIGAN_CARDS_DIR:-}"
 MG5_OUTPUT_INPUT="${KERRIGAN_MG5_OUTPUT:-${KERRIGAN_MG5_OUTPUT_NAME:-}}"
 TASK_INPUT="${KERRIGAN_TASK:-}"
 MODE_INPUT="${KERRIGAN_MODE:-}"
@@ -103,13 +105,17 @@ Usage:
   ./scripts/Kerrigan.sh <param_card.dat|glob> [options]
 
 Examples:
-  ./scripts/Kerrigan.sh para_card1.dat --mg5-output scotogenic
+  ./scripts/Kerrigan.sh /absolute/path/para_card1.dat --mg5-output scotogenic
+  ./scripts/Kerrigan.sh para_card1.dat --cards-dir /path/to/cards --mg5-output scotogenic
   ./scripts/Kerrigan.sh para_card1.dat --mg5-output scotogenic --task relic
   ./scripts/Kerrigan.sh para_card1.dat --mg5-output scotogenic --task sigmav
   ./scripts/Kerrigan.sh 'para_card*.dat' --mg5-output scotogenic \\
       --mode combined --candidate Chi_1
 
 Options:
+  --cards-dir DIR            Directory used to resolve a card filename/glob.
+                            Default: CMake build data/cards. A full card path
+                            works without this option.
   --mg5-output NAME|PATH     MG5 output folder. NAME is resolved below @FOLDER@.
   --task relic|sigmav       relic (default): sigmaV + neq.dat + TOTALS_T.dat.
                             sigmav: sigmaV + TOTALS_T.dat only.
@@ -147,6 +153,11 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             exit 0
+            ;;
+        --cards-dir)
+            [[ $# -ge 2 ]] || { echo "ERROR: --cards-dir needs a value" >&2; exit 2; }
+            CARDS_DIR_INPUT="$2"
+            shift 2
             ;;
         --mg5-output)
             [[ $# -ge 2 ]] || { echo "ERROR: --mg5-output needs a value" >&2; exit 2; }
@@ -214,6 +225,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 CARD_SPEC="${CARD_SPEC:-*.dat}"
+
+if [[ -n "$CARDS_DIR_INPUT" ]]; then
+    CARDS_DIR="$(python3 - "$CARDS_DIR_INPUT" <<'PY_CARDS'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).expanduser().resolve(strict=False))
+PY_CARDS
+)"
+fi
 
 case "${TASK_INPUT,,}" in
     ""|relic|relic_density|relic-density|density)
@@ -699,6 +719,7 @@ task=$TASK
 mg5_base_dir=$MG5_BASE_DIR
 mg5_output_folder=$MG5_OUTPUT_FOLDER
 build_dir=$BUILD_DIR
+cards_dir=$CARDS_DIR
 selection_source=$SELECTION_SOURCE
 selection_report=$SELECTION_REPORT
 selected_process_count=${#subprocess_folders[@]}
