@@ -41,11 +41,13 @@ shopt -s nullglob
 CONFIGURED_MG5_BASE_DIR="@FOLDER@"
 CONFIGURED_SOURCE_DIR="@CMAKE_SOURCE_DIR@"
 CONFIGURED_BUILD_DIR="@CMAKE_BINARY_DIR@"
+CONFIGURED_DATA_DIR="@DATA_DIR@"
+CONFIGURED_CARDS_DIR="@CARDS_DIR@"
+CONFIGURED_DATATABLES_DIR="@DATATABLES_DIR@"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# Prefer CMake's configured build directory.  If this template is configured in
-# an unusual way, fall back to the parent of scripts/, matching overseer.sh.in.
+# Prefer CMake's configured build directory
 if [[ "$CONFIGURED_BUILD_DIR" != @* && -d "$CONFIGURED_BUILD_DIR" ]]; then
     BUILD_DIR="$(cd -- "$CONFIGURED_BUILD_DIR" && pwd)"
 elif [[ -d "$SCRIPT_DIR/../bin" || -f "$SCRIPT_DIR/../CMakeCache.txt" || -f "$SCRIPT_DIR/../Makefile" ]]; then
@@ -60,6 +62,19 @@ else
     SOURCE_DIR="$(cd -- "$BUILD_DIR/.." && pwd)"
 fi
 
+# Use CMake-configured data directories
+if [[ "$CONFIGURED_DATA_DIR" != @* && -d "$CONFIGURED_DATA_DIR" ]]; then
+    DATA_DIR="$(cd -- "$CONFIGURED_DATA_DIR" && pwd)"
+else
+    DATA_DIR="$BUILD_DIR/data"
+fi
+
+if [[ "$CONFIGURED_CARDS_DIR" != @* && -d "$CONFIGURED_CARDS_DIR" ]]; then
+    CARDS_DIR_DEFAULT="$(cd -- "$CONFIGURED_CARDS_DIR" && pwd)"
+else
+    CARDS_DIR_DEFAULT="$DATA_DIR/cards"
+fi
+
 MG5_BASE_DIR="${KERRIGAN_MG5_BASE_DIR:-$CONFIGURED_MG5_BASE_DIR}"
 
 if [[ "$MG5_BASE_DIR" == @* || -z "$MG5_BASE_DIR" ]]; then
@@ -70,9 +85,6 @@ fi
 
 MG5_BASE_DIR="$(cd -- "$MG5_BASE_DIR" && pwd)"
 
-DATA_DIR="$BUILD_DIR/data"
-CARDS_DIR_DEFAULT="$DATA_DIR/cards"
-CARDS_DIR="$CARDS_DIR_DEFAULT"
 PROCESS_DIR="$BUILD_DIR/process"
 MODEL_DIR="$BUILD_DIR/model"
 LIB_DIR="$BUILD_DIR/lib"

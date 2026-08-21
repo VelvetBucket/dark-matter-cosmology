@@ -96,32 +96,29 @@ if(NOT MSVC)
 endif()
 
 # ============================================
-# Define data directory paths for executables
+# Define data directory paths for executables AND Kerrigan.sh
 # ============================================
-# These will be available as preprocessor definitions in your code
-# Usage: std::string path = DATA_DIR "/datatables/std_thg.txt";
 set(DATA_DIR "${CMAKE_CURRENT_BINARY_DIR}/data")
 set(CARDS_DIR "${DATA_DIR}/cards")
 set(DATATABLES_DIR "${DATA_DIR}/datatables")
 
-add_definitions(-DDATA_DIR="${CMAKE_CURRENT_BINARY_DIR}/data")
-add_definitions(-DCARDS_DIR="${DATA_DIR}/cards")
-add_definitions(-DDATATABLES_DIR="${DATA_DIR}/datatables")
+# Pass to C++ executables
+add_definitions(-DDATA_DIR="${DATA_DIR}")
+add_definitions(-DCARDS_DIR="${CARDS_DIR}")
+add_definitions(-DDATATABLES_DIR="${DATATABLES_DIR}")
 
 message(STATUS "Data directory definitions:")
 message(STATUS "  - DATA_DIR: ${DATA_DIR}")
 message(STATUS "  - CARDS_DIR: ${CARDS_DIR}")
 message(STATUS "  - DATATABLES_DIR: ${DATATABLES_DIR}")
+
 # ============================================
 # Directories in the BUILD tree
 # ============================================
-set(DATA_DIR ${CMAKE_CURRENT_BINARY_DIR}/data)
 set(SCRIPTS_DIR ${CMAKE_CURRENT_BINARY_DIR}/scripts)
 set(MODEL_DIR ${CMAKE_CURRENT_BINARY_DIR}/model)
 set(LIB_DIR ${CMAKE_CURRENT_BINARY_DIR}/lib)
 set(PROCESS_DIR ${CMAKE_CURRENT_BINARY_DIR}/process)
-set(CARDS_DIR ${DATA_DIR}/cards)
-set(DATATABLES_DIR ${DATA_DIR}/datatables)
 
 # Create directories
 file(MAKE_DIRECTORY ${MODEL_DIR})
@@ -134,7 +131,6 @@ file(MAKE_DIRECTORY ${SCRIPTS_DIR})
 
 # ============================================
 # Copy TEMPLATE files from source to build
-# These will be overwritten by overseer.sh at runtime
 # ============================================
 message(STATUS "Copying template files to build directory...")
 
