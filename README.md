@@ -122,8 +122,6 @@ Kerrigan.sh will:
 Results are saved in `build/output/<param_card_name>/` with:
 - `P1_*.dat` - Results for each subprocess
 - `TOTALS_T.dat` - Total cross sections
-- `TOTALS_n1.dat` - n1 channel totals
-- `TOTALS_etr.dat` - etr channel totals
 - `neq.dat` - Equilibrium data (if relic task)
 
 ## Quick Summary
