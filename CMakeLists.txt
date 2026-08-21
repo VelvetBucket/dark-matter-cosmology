@@ -96,6 +96,23 @@ if(NOT MSVC)
 endif()
 
 # ============================================
+# Define data directory paths for executables
+# ============================================
+# These will be available as preprocessor definitions in your code
+# Usage: std::string path = DATA_DIR "/datatables/std_thg.txt";
+set(DATA_DIR "${CMAKE_CURRENT_BINARY_DIR}/data")
+set(CARDS_DIR "${DATA_DIR}/cards")
+set(DATATABLES_DIR "${DATA_DIR}/datatables")
+
+add_definitions(-DDATA_DIR="${CMAKE_CURRENT_BINARY_DIR}/data")
+add_definitions(-DCARDS_DIR="${DATA_DIR}/cards")
+add_definitions(-DDATATABLES_DIR="${DATA_DIR}/datatables")
+
+message(STATUS "Data directory definitions:")
+message(STATUS "  - DATA_DIR: ${DATA_DIR}")
+message(STATUS "  - CARDS_DIR: ${CARDS_DIR}")
+message(STATUS "  - DATATABLES_DIR: ${DATATABLES_DIR}")
+# ============================================
 # Directories in the BUILD tree
 # ============================================
 set(DATA_DIR ${CMAKE_CURRENT_BINARY_DIR}/data)
@@ -260,6 +277,28 @@ target_link_libraries(evolution core_lib)
 
 add_executable(interp ${CMAKE_CURRENT_SOURCE_DIR}/src/main/interp.cpp)
 target_link_libraries(interp core_lib)
+
+# ============================================
+# Run interp automatically after build (only if output doesn't exist)
+# ============================================
+add_custom_command(
+    TARGET interp
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND ${CMAKE_COMMAND} -E echo "Checking if ${DATATABLES_DIR}/interp_ath.dat exists..."
+    COMMAND ${CMAKE_COMMAND} -E echo "========================================"
+    COMMAND /bin/bash -c "if [ ! -f ${DATATABLES_DIR}/interp_ath.dat ]; then \
+        echo '⚠️  interp output not found. Running interp...'; \
+        ${CMAKE_BINARY_DIR}/bin/interp > ${DATATABLES_DIR}/interp_ath.dat; \
+        echo '✅ interp output saved to ${DATATABLES_DIR}/interp_ath.dat'; \
+    else \
+        echo '✅ interp output already exists: ${DATATABLES_DIR}/interp_ath.dat'; \
+        echo '   To regenerate, delete the file and run: make interp'; \
+    fi"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running interp only if output doesn't exist"
+    VERBATIM
+)
 
 # ============================================
 # Output Directories for executables
