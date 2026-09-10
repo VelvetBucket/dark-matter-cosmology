@@ -2,16 +2,121 @@
 
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
+if [ "$#" -ne 2 ]; then
+    printf '%s\n' "Usage: $0 <template_files_dir> <odd_particles.txt>" >&2
     exit 1
 fi
 
 template_dir="${1%/}"
+odd_file="$2"
 original_dir="${template_dir}OG"
 
 if [ ! -d "$template_dir" ]; then
+    printf '%s\n' "template_files directory not found: $template_dir" >&2
     exit 1
 fi
+
+if [ ! -f "$odd_file" ]; then
+    printf '%s\n' "odd_particles.txt not found: $odd_file" >&2
+    exit 1
+fi
+
+# ============================================
+# Read UI1 output
+#
+# Expected format:
+#
+# # particle    antiparticle    mass      dof
+# N1            N1              MN1       2
+# N2            N2              MN2       2
+# etR           etR             MetR      1
+# etp           etpc            Metp      2
+# ============================================
+
+declare -a odd_particles=()
+declare -a odd_antiparticles=()
+declare -a odd_mass_parameters=()
+declare -a odd_dofs=()
+
+line_number=0
+
+while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    line_number=$((line_number + 1))
+
+    line="$raw_line"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+
+    if [ -z "$line" ] || [[ "$line" == \#* ]]; then
+        continue
+    fi
+
+    read -r particle antiparticle mass_parameter dof extra <<< "$line"
+
+    if [ -z "${particle:-}" ] || \
+       [ -z "${antiparticle:-}" ] || \
+       [ -z "${mass_parameter:-}" ] || \
+       [ -z "${dof:-}" ] || \
+       [ -n "${extra:-}" ]; then
+        printf '%s\n' \
+            "Invalid odd-particle entry at line $line_number:" \
+            "$raw_line" >&2
+        printf '%s\n' \
+            "Expected exactly 4 columns: particle antiparticle mass dof" >&2
+        exit 1
+    fi
+
+    if [[ ! "$mass_parameter" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        printf '%s\n' \
+            "Invalid UFO mass parameter '$mass_parameter' at line $line_number." >&2
+        exit 1
+    fi
+
+    if [[ ! "$dof" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
+        printf '%s\n' \
+            "Invalid DOF '$dof' at line $line_number." >&2
+        exit 1
+    fi
+
+    if ! awk -v x="$dof" 'BEGIN { exit !(x > 0) }'; then
+        printf '%s\n' \
+            "DOF must be positive at line $line_number." >&2
+        exit 1
+    fi
+
+    if [[ "$dof" =~ ^[0-9]+$ ]]; then
+        dof="${dof}.0"
+    fi
+
+    odd_particles+=("$particle")
+    odd_antiparticles+=("$antiparticle")
+    odd_mass_parameters+=("$mass_parameter")
+    odd_dofs+=("$dof")
+done < "$odd_file"
+
+if [ "${#odd_particles[@]}" -eq 0 ]; then
+    printf '%s\n' "No odd particles were found in: $odd_file" >&2
+    exit 1
+fi
+
+odd_cpp_block=$'    // BEGIN AUTO ODD PARTICLES\n'
+odd_cpp_block+=$'    // Set masses and degrees of freedom of odd-sector particles\n'
+odd_cpp_block+=$'    newMasses.clear();\n'
+odd_cpp_block+=$'    newDOF.clear();\n'
+
+for i in "${!odd_particles[@]}"; do
+    particle="${odd_particles[$i]}"
+    antiparticle="${odd_antiparticles[$i]}"
+    mass_parameter="${odd_mass_parameters[$i]}"
+    dof="${odd_dofs[$i]}"
+    mass_cpp="pars->mdl_${mass_parameter}"
+
+    odd_cpp_block+="    // ${particle} / ${antiparticle}"$'\n'
+    odd_cpp_block+="    newMasses.push_back(${mass_cpp});"$'\n'
+    odd_cpp_block+="    newDOF[${mass_cpp}] = ${dof};"$'\n'
+done
+
+odd_cpp_block+=$'    // END AUTO ODD PARTICLES\n'
 
 read_file() {
     cat "$1"
@@ -76,8 +181,22 @@ grep -Fq 'std::unordered_map<double, double> newDOF;' \
 # 6. cpp_process_function_definitions.inc
 grep -Fq '//pars->printIndependentParameters();' \
     "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
-grep -Fq 'newMasses.push_back(pars->mdl_MN1);' \
+grep -Fq '// BEGIN AUTO ODD PARTICLES' \
     "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
+grep -Fq '// END AUTO ODD PARTICLES' \
+    "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
+
+for i in "${!odd_particles[@]}"; do
+    mass_cpp="pars->mdl_${odd_mass_parameters[$i]}"
+
+    grep -Fq "// ${odd_particles[$i]} / ${odd_antiparticles[$i]}" \
+        "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
+    grep -Fq "newMasses.push_back(${mass_cpp});" \
+        "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
+    grep -Fq "newDOF[${mass_cpp}] = ${odd_dofs[$i]};" \
+        "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
+done
+
 grep -Fq 'double CPPProcess::sigmaKin(double s, double theta)' \
     "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
 grep -Fq '//pars->printDependentParameters();' \
@@ -323,9 +442,13 @@ then
     exit 1
 fi
 
+new_cpp_function_block=$'    SLHAReader slha(param_card_name);\n    pars->setIndependentParameters(slha);\n    pars->setIndependentCouplings();\n    //pars->printIndependentParameters();\n    //pars->printIndependentCouplings();\n'
+new_cpp_function_block+="$odd_cpp_block"
+new_cpp_function_block+=$'    %(initProc_lines)s\n} \n\n//--------------------------------------------------------------------------\n// Evaluate |M|^2, part independent of incoming flavour. \n\ndouble CPPProcess::sigmaKin(double s, double theta) { \n    // Set the parameters which change event by event\n    pars->setDependentParameters();\n    pars->setDependentCouplings();\n    static bool firsttime = true;\n    if (firsttime){\n\t//pars->printDependentParameters();\n\t//pars->printDependentCouplings();\n\tfirsttime = false;\n    }\n\n    // Reset color flows\n    %(reset_jamp_lines)s\n    %(sigmaKin_lines)s\n    \n}\n\n//--------------------------------------------------------------------------\n'
+
 if ! replace_block "$template_dir/cpp_process_function_definitions.inc" \
     $'    SLHAReader slha(param_card_name);\n    pars->setIndependentParameters(slha);\n    pars->setIndependentCouplings();\n    pars->printIndependentParameters();\n    pars->printIndependentCouplings();\n    %(initProc_lines)s\n} \n\n//--------------------------------------------------------------------------\n// Evaluate |M|^2, part independent of incoming flavour. \n\nvoid CPPProcess::sigmaKin() { \n    // Set the parameters which change event by event\n    pars->setDependentParameters();\n    pars->setDependentCouplings();\n    static bool firsttime = true;\n    if (firsttime){\n\tpars->printDependentParameters();\n\tpars->printDependentCouplings();\n\tfirsttime = false;\n    }\n\n    // Reset color flows\n    %(reset_jamp_lines)s\n    %(sigmaKin_lines)s\n}\n\n//--------------------------------------------------------------------------\n' \
-    $'    SLHAReader slha(param_card_name);\n    pars->setIndependentParameters(slha);\n    pars->setIndependentCouplings();\n    //pars->printIndependentParameters();\n    //pars->printIndependentCouplings();\n    // Set masses and degrees of freedom of new particles\n    newMasses.push_back(pars->mdl_MN1); \n    newDOF[pars->mdl_MN1] = 2.0;\n    newMasses.push_back(pars->mdl_MN2); \n    newDOF[pars->mdl_MN2] = 2.0;\n    newMasses.push_back(pars->mdl_MN3); \n    newDOF[pars->mdl_MN3] = 2.0;\n    newMasses.push_back(pars->mdl_MetR); \n    newDOF[pars->mdl_MetR] = 2.0;\n    newMasses.push_back(pars->mdl_MetI); \n    newDOF[pars->mdl_MetI] = 2.0;\n    newMasses.push_back(pars->mdl_Metp); \n    newDOF[pars->mdl_Metp] = 2.0;\n    %(initProc_lines)s\n} \n\n//--------------------------------------------------------------------------\n// Evaluate |M|^2, part independent of incoming flavour. \n\ndouble CPPProcess::sigmaKin(double s, double theta) { \n    // Set the parameters which change event by event\n    pars->setDependentParameters();\n    pars->setDependentCouplings();\n    static bool firsttime = true;\n    if (firsttime){\n\t//pars->printDependentParameters();\n\t//pars->printDependentCouplings();\n\tfirsttime = false;\n    }\n\n    // Reset color flows\n    %(reset_jamp_lines)s\n    %(sigmaKin_lines)s\n    \n}\n\n//--------------------------------------------------------------------------\n'
+    "$new_cpp_function_block"
 then
     rm -rf "$template_dir"
     mv "$original_dir" "$template_dir"
@@ -555,5 +678,6 @@ done
 printf '%s\n' "$cpp_content" > "$cpp_header"
 
 printf '%s\n' \
-    "template_files modified successfully. Old template_files moved to template_filesOG."
+    "template_files modified successfully using odd_particles.txt. Old template_files moved to template_filesOG."
+
 
