@@ -2,6 +2,7 @@
 
 import argparse
 import ast
+import os
 import sys
 from pathlib import Path
 
@@ -417,85 +418,134 @@ def build_particle_species(particles):
 # ============================================================
 
 def find_input_directory(explicit_path=None):
+    """
+    Locate the ExtraDM build input directory.
+
+    Priority:
+        1. explicit --input-dir
+        2. $INPUT_DIR from the environment
+        3. cwd/input
+        4. cwd/build/input
+        5. <UI1.py>/../../build/input
+    """
+    candidates = []
+
     if explicit_path is not None:
-        candidates = [
-            Path(explicit_path).expanduser().resolve()
-        ]
+        candidates.append(Path(explicit_path).expanduser())
 
-    else:
-        cwd = Path.cwd()
+    env_input = os.environ.get("INPUT_DIR")
+    if env_input:
+        candidates.append(Path(env_input).expanduser())
 
-        candidates = [
-            cwd / "input",
-            cwd / "build" / "input",
-            Path(__file__).resolve().parent.parent
-            / "build"
-            / "input",
-        ]
+    cwd = Path.cwd()
+    candidates.extend([
+        cwd / "input",
+        cwd / "build" / "input",
+        Path(__file__).resolve().parent.parent / "build" / "input",
+    ])
 
     for candidate in candidates:
         if candidate.is_dir():
             return candidate.resolve()
 
-    searched = "\n".join(
-        f"  - {path}"
-        for path in candidates
-    )
+    searched = "\n".join(f"  - {path}" for path in candidates)
 
     raise RuntimeError(
         "Could not find the input directory.\n\n"
         "Searched:\n"
         f"{searched}\n\n"
         "You can specify it manually with:\n"
-        "  python3 configure_dark_sector.py "
-        "--input-dir /path/to/build/input"
+        "  UI1.py --input-dir /path/to/build/input\n"
+        "or by exporting INPUT_DIR."
     )
 
 
-def find_ufo_directory(input_dir):
+def find_variant_directory(input_dir, variant_name):
     """
-    Exactly one UFO model is expected inside input/.
+    Return the variant directory inside input_dir.
 
-    A UFO model is identified by particles.py.
+    Layout expected:
 
-    The param_cards directory is therefore ignored automatically.
+        input/
+        ├── var1/
+        │   ├── <UFO model>/        # contains particles.py
+        │   ├── param_cards/        # ignored by the UFO detection
+        │   └── ...
+        ├── var2/
+        │   └── ...
+        └── ...
+
+    Exactly one UFO model (identified by particles.py) is
+    expected under input/<variant_name>/ (at any depth up to 2).
     """
-    ufo_directories = []
+    variant_dir = (input_dir / variant_name).resolve()
 
-    for item in input_dir.iterdir():
+    if not variant_dir.is_dir():
+        raise RuntimeError(
+            f"Variant directory does not exist:\n"
+            f"  {variant_dir}\n\n"
+            f"Create it and place the UFO model inside it, e.g.:\n"
+            f"  mkdir -p {variant_dir}/model_UFO\n"
+            f"  cp -r /path/to/your/UFO/* {variant_dir}/model_UFO/"
+        )
 
+    return variant_dir
+
+
+def find_ufo_directory(variant_dir):
+    """
+    Find the single UFO model directory inside variant_dir.
+
+    A UFO model is identified by the presence of particles.py.
+
+    The search is limited to the variant directory itself and
+    one level below it, so that auxiliary directories such as
+    param_cards/ do not confuse the detection.
+    """
+    candidates = []
+
+    # The variant directory itself may be the UFO model
+    if (variant_dir / "particles.py").is_file():
+        candidates.append(variant_dir)
+
+    # Or the UFO model may be a direct subdirectory
+    for item in variant_dir.iterdir():
         if not item.is_dir():
             continue
 
         if (item / "particles.py").is_file():
-            ufo_directories.append(item)
+            candidates.append(item)
 
-    if len(ufo_directories) == 0:
+    if len(candidates) == 0:
         raise RuntimeError(
             "No UFO model was found inside:\n"
-            f"  {input_dir}\n\n"
+            f"  {variant_dir}\n\n"
             "Expected something like:\n\n"
-            "  input/\n"
+            f"  {variant_dir.name}/\n"
             "  ├── model_UFO/\n"
             "  │   ├── particles.py\n"
             "  │   ├── parameters.py\n"
             "  │   └── ...\n"
-            "  └── param_cards/\n"
+            "  ├── param_cards/\n"
+            "  └── ...\n\n"
+            "A UFO model is any directory that contains "
+            "particles.py."
         )
 
-    if len(ufo_directories) > 1:
+    if len(candidates) > 1:
         models = "\n".join(
-            f"  - {directory.name}"
-            for directory in ufo_directories
+            f"  - {directory}"
+            for directory in candidates
         )
 
         raise RuntimeError(
-            "More than one UFO model was found inside input/.\n"
+            "More than one UFO model was found inside:\n"
+            f"  {variant_dir}\n\n"
             "Exactly one UFO model is expected.\n\n"
             f"Found:\n{models}"
         )
 
-    return ufo_directories[0]
+    return candidates[0]
 
 
 # ============================================================
@@ -853,11 +903,37 @@ def write_odd_particles(output_file, selected):
 # Program
 # ============================================================
 
+def resolve_variant(cli_variant):
+    """
+    Resolve which variant to use.
+
+    Priority:
+        1. --variant on the command line
+        2. $VARIANT from the environment
+        3. error
+    """
+    if cli_variant:
+        return cli_variant
+
+    env_variant = os.environ.get("VARIANT")
+    if env_variant:
+        return env_variant
+
+    raise RuntimeError(
+        "No variant was specified.\n\n"
+        "Either:\n"
+        "  * run through initiate_model.sh:  ./initiate_model.sh var1\n"
+        "  * export VARIANT=var1 before running UI1.py\n"
+        "  * pass --variant var1 explicitly"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
             "Configure the Z2-odd dark-sector particles "
-            "of an ExtraDM UFO model."
+            "of an ExtraDM UFO model stored in a specific "
+            "variant inside input/."
         )
     )
 
@@ -865,18 +941,35 @@ def main():
         "--input-dir",
         help=(
             "Path to the ExtraDM input directory. "
-            "Normally this is build/input."
+            "Normally this is build/input. "
+            "If omitted, $INPUT_DIR is used, then auto-detection."
+        ),
+    )
+
+    parser.add_argument(
+        "-v", "--variant",
+        default=None,
+        help=(
+            "Name of the variant subdirectory inside input/. "
+            "If omitted, $VARIANT is used (set by initiate_model.sh)."
         ),
     )
 
     args = parser.parse_args()
 
+    variant_name = resolve_variant(args.variant)
+
     input_dir = find_input_directory(
         args.input_dir
     )
 
+    variant_dir = find_variant_directory(
+        input_dir,
+        variant_name,
+    )
+
     ufo_dir = find_ufo_directory(
-        input_dir
+        variant_dir
     )
 
     particles_file = (
@@ -898,6 +991,8 @@ def main():
     print("=" * 70)
     print()
     print(f"Input directory : {input_dir}")
+    print(f"Variant         : {variant_name}")
+    print(f"Variant path    : {variant_dir}")
     print(f"UFO model       : {ufo_dir.name}")
     print(f"Particles file  : {particles_file}")
     print(f"Particle species: {len(species)}")
@@ -922,7 +1017,7 @@ def main():
         )
 
     output_file = (
-        input_dir
+        variant_dir
         / "odd_particles.txt"
     )
 

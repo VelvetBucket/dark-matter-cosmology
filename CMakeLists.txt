@@ -368,10 +368,36 @@ file(CHMOD "${UI_WRAPPER}"
         WORLD_READ WORLD_EXECUTE
 )
 
+# ==============================================================================
+# Configure initiate_model.sh  (runs UI1.py for a given variant)
+# ==============================================================================
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/initiate_model.sh.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/initiate_model.sh"
+    @ONLY
+)
+
+file(CHMOD "${CMAKE_CURRENT_BINARY_DIR}/initiate_model.sh"
+    PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE
+        WORLD_READ WORLD_EXECUTE
+)
+
+message(STATUS "Created initiate_model.sh: ${CMAKE_CURRENT_BINARY_DIR}/initiate_model.sh")
 
 # ==============================================================================
 # Convenience targets
 # ==============================================================================
+
+set(MODEL_VARIANT "example" CACHE STRING "Variant used by `make model`")
+add_custom_target(model
+    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/initiate_model.sh" "${MODEL_VARIANT}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    COMMENT "Running UI1.py for variant ${MODEL_VARIANT}"
+    USES_TERMINAL
+)
+
 add_custom_target(ui
     COMMAND "${CMAKE_CURRENT_BINARY_DIR}/run_ui"
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
