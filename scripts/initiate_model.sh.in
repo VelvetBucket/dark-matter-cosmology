@@ -55,6 +55,9 @@ PROCESS_DIR="@PROCESS_DIR@"
 INPUT_DIR="${BUILD_DIR}/input"
 VARIANT_DIR="${INPUT_DIR}/${VARIANT}"
 
+OUTPUT_ROOT="${BUILD_DIR}/output"
+OUTPUT_DIR="${OUTPUT_ROOT}/${VARIANT}"
+
 # ------------------------------------------------------------------
 # Sanity checks
 # ------------------------------------------------------------------
@@ -79,6 +82,23 @@ if [[ ! -d "${VARIANT_DIR}" ]]; then
 fi
 
 # ------------------------------------------------------------------
+# Output directories
+#   <build>/output/         — created once
+#   <build>/output/<var>/   — created per variant
+# ------------------------------------------------------------------
+if [[ ! -d "${OUTPUT_ROOT}" ]]; then
+    mkdir -p "${OUTPUT_ROOT}"
+    echo "Created output root: ${OUTPUT_ROOT}"
+fi
+
+if [[ ! -d "${OUTPUT_DIR}" ]]; then
+    mkdir -p "${OUTPUT_DIR}"
+    echo "Created variant output directory: ${OUTPUT_DIR}"
+else
+    echo "Using existing variant output directory: ${OUTPUT_DIR}"
+fi
+
+# ------------------------------------------------------------------
 # Environment for UI1.py
 # ------------------------------------------------------------------
 export VARIANT
@@ -89,6 +109,8 @@ export UI_DIR
 export DATATABLES_DIR
 export PROCESS_DIR
 export MG5_BASE_DIR
+export OUTPUT_ROOT
+export OUTPUT_DIR
 
 # Run from the build directory so relative paths in UI1.py resolve.
 cd "${BUILD_DIR}"
@@ -98,6 +120,7 @@ echo "  ExtraDM — initiate_model"
 echo "========================================"
 echo "  Variant     : ${VARIANT}"
 echo "  Variant dir : ${VARIANT_DIR}"
+echo "  Output dir  : ${OUTPUT_DIR}"
 echo "  UI          : ${UI_SCRIPT}"
 echo "  Build dir   : ${BUILD_DIR}"
 echo "  MG5 base    : ${MG5_BASE_DIR}"
