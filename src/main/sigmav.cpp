@@ -3,9 +3,9 @@
 #include <iomanip>
 #include <string>
 #include <cmath>
-#include "process/CPPProcess.h"
-#include "process/momenta.h"
-#include "tools/tools.h"
+#include "CPPProcess.h"
+#include "momenta.h"
+#include "tools.h"
 #include <algorithm> 
 #include <unordered_map>
 #include <boost/math/quadrature/gauss_kronrod.hpp>
