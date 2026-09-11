@@ -5,7 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath> 
-#include "tools/tools.h"
+#include "tools.h"
 
 using namespace std;
 
