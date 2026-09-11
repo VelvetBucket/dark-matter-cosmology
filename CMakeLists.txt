@@ -74,62 +74,6 @@ else()
 endif()
 
 # ============================================
-# Run modify_template.sh to prepare template files
-# ============================================
-set(MODIFY_TEMPLATE_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template.sh)
-set(MG5_TEMPLATE_DIR "${FOLDER}/madgraph/iolibs/template_files")
-
-# Make sure the script is executable
-if(EXISTS "${MODIFY_TEMPLATE_SCRIPT}")
-    execute_process(
-        COMMAND chmod +x "${MODIFY_TEMPLATE_SCRIPT}"
-        RESULT_VARIABLE CHMOD_RESULT
-    )
-    if(CHMOD_RESULT EQUAL 0)
-        message(STATUS "✅ Made modify_template.sh executable")
-    endif()
-endif()
-
-if(EXISTS "${MODIFY_TEMPLATE_SCRIPT}" AND EXISTS "${MG5_TEMPLATE_DIR}")
-    message(STATUS "Running modify_template.sh with template directory: ${MG5_TEMPLATE_DIR}")
-    
-    execute_process(
-        COMMAND /bin/bash "${MODIFY_TEMPLATE_SCRIPT}" "${MG5_TEMPLATE_DIR}"
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        RESULT_VARIABLE MODIFY_TEMPLATE_RESULT
-        OUTPUT_VARIABLE MODIFY_TEMPLATE_OUTPUT
-        ERROR_VARIABLE MODIFY_TEMPLATE_ERROR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_STRIP_TRAILING_WHITESPACE
-    )
-    
-    if(MODIFY_TEMPLATE_OUTPUT)
-        message(STATUS "modify_template.sh output: ${MODIFY_TEMPLATE_OUTPUT}")
-    endif()
-    
-    if(MODIFY_TEMPLATE_RESULT EQUAL 0)
-        message(STATUS "✅ modify_template.sh completed successfully")
-    else()
-        message(WARNING "modify_template.sh failed with error code: ${MODIFY_TEMPLATE_RESULT}")
-        if(MODIFY_TEMPLATE_ERROR)
-            message(WARNING "  Error: ${MODIFY_TEMPLATE_ERROR}")
-        endif()
-        message(WARNING "  To debug, run manually:")
-        message(WARNING "  cd ${CMAKE_CURRENT_SOURCE_DIR}")
-        message(WARNING "  ./scripts/modify_template.sh ${MG5_TEMPLATE_DIR}")
-    endif()
-else()
-    if(NOT EXISTS "${MODIFY_TEMPLATE_SCRIPT}")
-        message(WARNING "modify_template.sh not found at: ${MODIFY_TEMPLATE_SCRIPT}")
-    endif()
-    if(NOT EXISTS "${MG5_TEMPLATE_DIR}")
-        message(WARNING "MadGraph5 template directory not found: ${MG5_TEMPLATE_DIR}")
-        message(WARNING "  Expected path: ${FOLDER}/madgraph/iolibs/template_files")
-    endif()
-    message(WARNING "Skipping modify_template.sh execution")
-endif()
-
-# ============================================
 # C++ Standard Settings
 # ============================================
 set(CMAKE_CXX_STANDARD 14)
@@ -154,38 +98,28 @@ endif()
 # ============================================
 # Define data directory paths for executables
 # ============================================
-set(DATA_DIR "${CMAKE_CURRENT_BINARY_DIR}/data")
-set(CARDS_DIR "${DATA_DIR}/cards")
-set(DATATABLES_DIR "${DATA_DIR}/datatables")
+set(EXAMPLE_DIR "${CMAKE_CURRENT_BINARY_DIR}/example_input")
+set(DATATABLES_DIR "${CMAKE_CURRENT_BINARY_DIR}/datatables")
 set(UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/UI")
 
-add_definitions(-DDATA_DIR="${DATA_DIR}")
-add_definitions(-DCARDS_DIR="${CARDS_DIR}")
 add_definitions(-DDATATABLES_DIR="${DATATABLES_DIR}")
 
 message(STATUS "Data directory definitions:")
-message(STATUS "  - DATA_DIR: ${DATA_DIR}")
-message(STATUS "  - CARDS_DIR: ${CARDS_DIR}")
 message(STATUS "  - DATATABLES_DIR: ${DATATABLES_DIR}")
+message(STATUS "  - EXAMPLE_DIR: ${EXAMPLE_DIR}")
 message(STATUS "  - UI_DIR: ${UI_DIR}")
 
 # ============================================
 # Directories in the BUILD tree
 # ============================================
 set(SCRIPTS_DIR ${CMAKE_CURRENT_BINARY_DIR}/scripts)
-set(MODEL_DIR ${CMAKE_CURRENT_BINARY_DIR}/model)
-set(LIB_DIR ${CMAKE_CURRENT_BINARY_DIR}/lib)
-set(PROCESS_DIR ${CMAKE_CURRENT_BINARY_DIR}/process)
+set(INPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/input)
 set(BUILD_UI_DIR ${CMAKE_CURRENT_BINARY_DIR}/UI)
 
 # Create directories
-file(MAKE_DIRECTORY ${MODEL_DIR})
-file(MAKE_DIRECTORY ${LIB_DIR})
-file(MAKE_DIRECTORY ${PROCESS_DIR})
-file(MAKE_DIRECTORY ${DATA_DIR})
-file(MAKE_DIRECTORY ${CARDS_DIR})
 file(MAKE_DIRECTORY ${DATATABLES_DIR})
 file(MAKE_DIRECTORY ${SCRIPTS_DIR})
+file(MAKE_DIRECTORY ${INPUT_DIR})
 file(MAKE_DIRECTORY ${BUILD_UI_DIR})
 
 # ============================================
@@ -212,35 +146,19 @@ else()
 endif()
 
 # ============================================
-# Copy TEMPLATE files from source to build
+# Copy EXAMPLE files from source to build
 # ============================================
-message(STATUS "Copying template files to build directory...")
+message(STATUS "Copying example files to build directory...")
 
-# Copy template model files
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/templates/model)
-    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/templates/model
-         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-    message(STATUS "  - Copied template model files to ${MODEL_DIR}")
+# Copy example files
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/example_input)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/example_input
+         DESTINATION ${INPUT_DIR})
+    file(RENAME ${INPUT_DIR}/example_input
+            ${INPUT_DIR}/example)
+    message(STATUS "  - Copied example files to ${INPUT_DIR}/example")
 else()
-    message(WARNING "No template model files found in templates/model/")
-endif()
-
-# Copy template process files
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/templates/process)
-    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/templates/process
-         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-    message(STATUS "  - Copied template process files to ${PROCESS_DIR}")
-else()
-    message(WARNING "No template process files found in templates/process/")
-endif()
-
-# Copy template library files
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/templates/lib)
-    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/templates/lib
-         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-    message(STATUS "  - Copied template library files to ${LIB_DIR}")
-else()
-    message(WARNING "No template library files found in templates/lib/")
+    message(WARNING "No example files found in example_input/")
 endif()
 
 # ============================================
@@ -408,8 +326,6 @@ file(WRITE ${UI_WRAPPER} "#!/usr/bin/env bash\n")
 file(APPEND ${UI_WRAPPER} "# Wrapper script to run UI.py from the build directory\n")
 file(APPEND ${UI_WRAPPER} "# Generated by CMake\n\n")
 file(APPEND ${UI_WRAPPER} "# Set environment variables for the UI\n")
-file(APPEND ${UI_WRAPPER} "export DATA_DIR=\"${DATA_DIR}\"\n")
-file(APPEND ${UI_WRAPPER} "export CARDS_DIR=\"${CARDS_DIR}\"\n")
 file(APPEND ${UI_WRAPPER} "export DATATABLES_DIR=\"${DATATABLES_DIR}\"\n")
 file(APPEND ${UI_WRAPPER} "export BUILD_DIR=\"${CMAKE_CURRENT_BINARY_DIR}\"\n")
 file(APPEND ${UI_WRAPPER} "export MG5_BASE_DIR=\"${FOLDER}\"\n\n")
@@ -492,9 +408,6 @@ message(STATUS "Files in build directory:")
 message(STATUS "  - Data files:      ${DATA_DIR}")
 message(STATUS "  - Scripts:         ${SCRIPTS_DIR}")
 message(STATUS "  - UI:              ${BUILD_UI_DIR}")
-message(STATUS "  - Model files:     ${MODEL_DIR} (templates)")
-message(STATUS "  - Process files:   ${PROCESS_DIR} (templates)")
-message(STATUS "  - Libraries:       ${LIB_DIR} (templates)")
 message(STATUS "========================================")
 message(STATUS "Executables:")
 message(STATUS "  - sigmav     : ${CMAKE_BINARY_DIR}/bin/sigmav")

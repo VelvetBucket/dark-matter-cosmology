@@ -1,0 +1,50 @@
+Defined multiparticle all = g a nu1 nu2 nu3 d1 d2 d3 u1 u2 u3 d1bar d2bar d3bar u1bar u2bar u3bar etp h eti etr z wp etpc wpc n1 n2 n3 e1 e2 e3 e1bar e2bar e3bar
+
+define odd = n1 n2 n3 etp etpc eti etr
+
+generate odd odd > all all
+
+output scotogenic_diagrams
+
+
+remove:
+
+parameters.py
+HPP1 = Parameter(name='HPP1',
+    nature = 'external',
+    type = 'real',
+    value = 0.,
+    texname = '\\text{HPP1}',
+    lhablock = 'EFFHIGGSCOUPLINGS',
+    lhacode = [25,22,22] )
+
+HGG1 = Parameter(name='HGG1',
+    nature = 'external',
+    type = 'real',
+    value = 0.,
+    texname = '\\text{HGG1}',
+    lhablock = 'EFFHIGGSCOUPLINGS',
+    lhacode = [25,21,21] )
+    
+coupling.py
+GC_391=Coupling(name='GC_391',
+    value='-(HPP1*complex(0,1))',
+    order={'HIW':1})
+
+GC_392=Coupling(name='GC_392',
+    value='-(HGG1*complex(0,1))',
+    order={'HIG':1})
+
+vertices.py
+V_261 = Vertex(name = 'V_261',
+    particles = [P.A, P.A, P.h],
+    color = ['1'],
+    lorentz = [L.VVS99],
+    couplings = {(0,0):C.GC_391})
+
+
+V_262 = Vertex(name = 'V_262',
+    particles = [P.g, P.g, P.h],
+    color = ['Identity(1,2)'],
+    lorentz = [L.VVS99],
+    couplings = {(0,0):C.GC_392})
