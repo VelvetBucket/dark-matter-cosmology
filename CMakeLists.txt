@@ -96,35 +96,35 @@ if(NOT MSVC)
 endif()
 
 # ============================================
-# Define data directory paths for executables
-# ============================================
-set(EXAMPLE_DIR "${CMAKE_CURRENT_BINARY_DIR}/example_input")
-set(DATATABLES_DIR "${CMAKE_CURRENT_BINARY_DIR}/datatables")
-set(UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/UI")
-
-add_definitions(-DDATATABLES_DIR="${DATATABLES_DIR}")
-
-message(STATUS "Data directory definitions:")
-message(STATUS "  - DATATABLES_DIR: ${DATATABLES_DIR}")
-message(STATUS "  - EXAMPLE_DIR: ${EXAMPLE_DIR}")
-message(STATUS "  - UI_DIR: ${UI_DIR}")
-
-# ============================================
 # Directories in the BUILD tree
 # ============================================
 set(SCRIPTS_DIR ${CMAKE_CURRENT_BINARY_DIR}/scripts)
 set(INPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/input)
 set(BUILD_UI_DIR ${CMAKE_CURRENT_BINARY_DIR}/UI)
+set(EXAMPLE_DIR "${INPUT_DIR}/example")
+set(DATATABLES_DIR "${CMAKE_CURRENT_BINARY_DIR}/datatables")
 
 # Create directories
-file(MAKE_DIRECTORY ${DATATABLES_DIR})
 file(MAKE_DIRECTORY ${SCRIPTS_DIR})
 file(MAKE_DIRECTORY ${INPUT_DIR})
 file(MAKE_DIRECTORY ${BUILD_UI_DIR})
+file(MAKE_DIRECTORY ${EXAMPLE_DIR})
+file(MAKE_DIRECTORY ${DATATABLES_DIR})
+
+# ============================================
+# Define data directory paths for executables
+# ============================================
+add_definitions(-DDATATABLES_DIR="${DATATABLES_DIR}")
+
+message(STATUS "Data directory definitions:")
+message(STATUS "  - DATATABLES_DIR: ${DATATABLES_DIR}")
+message(STATUS "  - EXAMPLE_DIR: ${EXAMPLE_DIR}")
 
 # ============================================
 # Copy UI files to build directory
 # ============================================
+message(STATUS "Copying UI files to build directory...")
+
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/UI)
     # Copy all Python files
     file(GLOB UI_PY_FILES "${CMAKE_CURRENT_SOURCE_DIR}/UI/*.py")
@@ -132,7 +132,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/UI)
         get_filename_component(FILENAME ${FILE} NAME)
         configure_file(${FILE} ${BUILD_UI_DIR}/${FILENAME} COPYONLY)
     endforeach()
-    message(STATUS "Copied UI Python files to ${BUILD_UI_DIR}")
+    message(STATUS "  - Copied UI Python files to ${BUILD_UI_DIR}")
     
     # Copy any other UI files (JSON, etc.)
     file(GLOB UI_OTHER_FILES "${CMAKE_CURRENT_SOURCE_DIR}/UI/*.json" "${CMAKE_CURRENT_SOURCE_DIR}/UI/*.txt")
@@ -140,13 +140,13 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/UI)
         get_filename_component(FILENAME ${FILE} NAME)
         configure_file(${FILE} ${BUILD_UI_DIR}/${FILENAME} COPYONLY)
     endforeach()
-    message(STATUS "Copied UI data files to ${BUILD_UI_DIR}")
+    message(STATUS "  - Copied UI data files to ${BUILD_UI_DIR}")
 else()
     message(WARNING "UI directory not found at ${CMAKE_CURRENT_SOURCE_DIR}/UI")
 endif()
 
 # ============================================
-# Copy EXAMPLE files from source to build
+# Copy example files from source to build
 # ============================================
 message(STATUS "Copying example files to build directory...")
 
@@ -155,35 +155,23 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/example_input)
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/example_input
          DESTINATION ${INPUT_DIR})
     file(RENAME ${INPUT_DIR}/example_input
-            ${INPUT_DIR}/example)
-    message(STATUS "  - Copied example files to ${INPUT_DIR}/example")
+            ${EXAMPLE_DIR})
+    message(STATUS "  - Copied example files to ${EXAMPLE_DIR}")
 else()
     message(WARNING "No example files found in example_input/")
 endif()
 
 # ============================================
-# Copy data files to build directory
+# Copy datatables to build directory
 # ============================================
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/data/cards)
-    file(GLOB CARD_FILES "${CMAKE_CURRENT_SOURCE_DIR}/data/cards/*.dat")
-    foreach(FILE ${CARD_FILES})
-        get_filename_component(FILENAME ${FILE} NAME)
-        configure_file(${FILE} ${CARDS_DIR}/${FILENAME} COPYONLY)
-    endforeach()
-    message(STATUS "Copied parameter cards to ${CARDS_DIR}")
-else()
-    message(WARNING "No cards found in ${CMAKE_CURRENT_SOURCE_DIR}/data/cards")
-endif()
+message(STATUS "Copying datatables to build directory...")
 
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/data/datatables)
-    file(GLOB DATATABLE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/data/datatables/*.txt")
-    foreach(FILE ${DATATABLE_FILES})
-        get_filename_component(FILENAME ${FILE} NAME)
-        configure_file(${FILE} ${DATATABLES_DIR}/${FILENAME} COPYONLY)
-    endforeach()
-    message(STATUS "Copied datatables to ${DATATABLES_DIR}")
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/datatables)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/datatables
+         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+    message(STATUS "  - Copied datatables to ${DATATABLES_DIR}")
 else()
-    message(WARNING "No datatables found in ${CMAKE_CURRENT_SOURCE_DIR}/data/datatables")
+    message(WARNING "No datatables found in ${CMAKE_CURRENT_SOURCE_DIR}/datatables")
 endif()
 
 # ============================================
