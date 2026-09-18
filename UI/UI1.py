@@ -3,9 +3,9 @@
 import argparse
 import ast
 import os
+import subprocess
 import sys
 from pathlib import Path
-
 
 # ============================================================
 # UFO parsing helpers
@@ -898,6 +898,149 @@ def write_odd_particles(output_file, selected):
         encoding="utf-8"
     )
 
+# ============================================================
+# MadGraph template configuration
+# ============================================================
+
+def get_madgraph_directory(build_dir):
+    """
+    Read MADGRAPH_DIR from the CMake cache generated during:
+
+        cmake .. -DMADGRAPH_DIR=/path/to/MadGraph
+    """
+    cache_file = build_dir / "CMakeCache.txt"
+
+    if not cache_file.is_file():
+        raise RuntimeError(
+            "CMakeCache.txt was not found:\n"
+            f"  {cache_file}\n\n"
+            "Run CMake before running UI1."
+        )
+
+    for line in cache_file.read_text(
+        encoding="utf-8",
+        errors="replace"
+    ).splitlines():
+
+        if line.startswith("MADGRAPH_DIR:"):
+            _, value = line.split("=", 1)
+
+            madgraph_dir = Path(
+                value.strip()
+            ).expanduser().resolve()
+
+            if not madgraph_dir.is_dir():
+                raise RuntimeError(
+                    "The MadGraph directory stored in CMakeCache.txt "
+                    "does not exist:\n"
+                    f"  {madgraph_dir}"
+                )
+
+            return madgraph_dir
+
+    raise RuntimeError(
+        "MADGRAPH_DIR was not found in CMakeCache.txt."
+    )
+
+
+def find_modify_template_script(build_dir):
+    """
+    Locate modify_template.sh.
+
+    The build-tree copy is preferred. Source-tree locations are
+    kept as fallbacks so UI1 can also be tested directly from
+    the repository.
+    """
+    repo_dir = build_dir.parent
+
+    candidates = [
+        build_dir / "scripts" / "modify_template.sh",
+        build_dir / "scripts" / "modify_template" / "modify_template.sh",
+        repo_dir / "scripts" / "modify_template.sh",
+        repo_dir / "scripts" / "modify_template" / "modify_template.sh",
+    ]
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+
+    searched = "\n".join(
+        f"  - {candidate}"
+        for candidate in candidates
+    )
+
+    raise RuntimeError(
+        "Could not find modify_template.sh.\n\n"
+        f"Searched:\n{searched}"
+    )
+
+
+def run_modify_template(input_dir, odd_particles_file):
+    """
+    Run:
+
+        modify_template.sh <template_files_dir> <odd_particles.txt>
+
+    MADGRAPH_DIR is obtained automatically from CMakeCache.txt.
+    """
+    build_dir = input_dir.parent.resolve()
+
+    madgraph_dir = get_madgraph_directory(
+        build_dir
+    )
+
+    modify_script = find_modify_template_script(
+        build_dir
+    )
+
+    template_dir = (
+        madgraph_dir
+        / "madgraph"
+        / "iolibs"
+        / "template_files"
+    )
+
+    if not template_dir.is_dir():
+        raise RuntimeError(
+            "MadGraph template_files directory was not found:\n"
+            f"  {template_dir}"
+        )
+
+    if not odd_particles_file.is_file():
+        raise RuntimeError(
+            "odd_particles.txt was not found:\n"
+            f"  {odd_particles_file}"
+        )
+
+    print()
+    print("=" * 70)
+    print("Configuring MadGraph templates")
+    print("=" * 70)
+    print()
+    print(f"MadGraph         : {madgraph_dir}")
+    print(f"template_files   : {template_dir}")
+    print(f"odd_particles.txt: {odd_particles_file}")
+    print()
+
+    try:
+        subprocess.run(
+            [
+                "bash",
+                str(modify_script),
+                str(template_dir),
+                str(odd_particles_file),
+            ],
+            check=True,
+        )
+
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "modify_template.sh failed "
+            f"with exit code {exc.returncode}."
+        ) from exc
+
+    print()
+    print("MadGraph templates configured successfully.")
 
 # ============================================================
 # Program
@@ -1029,6 +1172,11 @@ def main():
     write_odd_particles(
         output_file,
         selected
+    )
+
+    run_modify_template(
+        input_dir,
+        output_file
     )
 
     print()
