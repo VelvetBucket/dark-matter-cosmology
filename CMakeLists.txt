@@ -147,10 +147,19 @@ endif()
 
 # --- example_input ----------------------------------------------------------
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/example_input")
-    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/example_input"
-         DESTINATION "${INPUT_DIR}")
-    file(RENAME "${INPUT_DIR}/example_input" "${EXAMPLE_DIR}")
-    message(STATUS "  example_input       -> ${EXAMPLE_DIR}")
+    file(MAKE_DIRECTORY "${EXAMPLE_DIR}")
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/example_input"
+                "${EXAMPLE_DIR}"
+        RESULT_VARIABLE _EXAMPLE_COPY_RESULT
+    )
+    if(_EXAMPLE_COPY_RESULT EQUAL 0)
+        message(STATUS "  example_input       -> ${EXAMPLE_DIR}")
+    else()
+        message(WARNING "  Failed to copy example_input "
+                        "(exit ${_EXAMPLE_COPY_RESULT})")
+    endif()
 else()
     message(WARNING "example_input/ not found in source tree")
 endif()
@@ -164,19 +173,14 @@ else()
     message(WARNING "datatables/ not found in source tree")
 endif()
 
-# --- scripts ----------------------------------------------------------------
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template")
-    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/scripts/modify_template"
+# --- scripts ---------------------------------------------------------------
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_madgraph")
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_madgraph"
          DESTINATION "${SCRIPTS_DIR}")
-    message(STATUS "  modify_template     -> ${SCRIPTS_DIR}/modify_template")
+    message(STATUS "  run_magraph/        -> ${SCRIPTS_DIR}/run_madgraph")
+else()
+    message(WARNING "scripts/run_madgraph/ not found in source tree")
 endif()
-
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts/utilities")
-    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/scripts/utilities"
-         DESTINATION "${SCRIPTS_DIR}")
-    message(STATUS "  utilities           -> ${SCRIPTS_DIR}/utilities")
-endif()
-
 
 # ==============================================================================
 # Seed process_files/ with the contents of example_process/

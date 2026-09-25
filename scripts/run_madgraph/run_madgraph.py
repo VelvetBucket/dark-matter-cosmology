@@ -1028,7 +1028,9 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Generate a MadGraph standalone_cpp package from a UFO "
             "model and a list of Z2-odd particles. Supports both an "
-            "explicit CLI and a CMake-build-aware pipeline mode."
+            "explicit CLI and a CMake-build-aware pipeline mode. "
+            "In pipeline mode, --build-dir/--input-dir/--variant are "
+            "inferred from the environment when not given."
         )
     )
 
@@ -1036,9 +1038,8 @@ def parse_args() -> argparse.Namespace:
         "--build-dir",
         type=Path,
         help=(
-            "Configured CMake build directory. Recommended pipeline mode. "
-            "When supplied, the script can infer MadGraph from CMakeCache.txt, "
-            "use <build>/input for user inputs and <build>/generated for output."
+            "Configured CMake build directory. In pipeline mode this "
+            "defaults to $BUILD_DIR (set by initiate_model.sh)."
         ),
     )
 
@@ -1046,7 +1047,18 @@ def parse_args() -> argparse.Namespace:
         "--input-dir",
         type=Path,
         help=(
-            "Pipeline input directory. Default with --build-dir: <build>/input."
+            "Pipeline input directory. Defaults to $INPUT_DIR if set, "
+            "otherwise <build>/input."
+        ),
+    )
+
+    parser.add_argument(
+        "--variant",
+        default=None,
+        help=(
+            "Variant subdirectory inside the input directory. "
+            "Defaults to $VARIANT (set by initiate_model.sh). "
+            "When set, <input>/<variant> is used as the UFO/odd-file root."
         ),
     )
 
@@ -1064,7 +1076,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "Path to the UFO model directory. Optional in pipeline mode when "
-            "exactly one UFO exists under <build>/input."
+            "exactly one UFO exists under <input>/<variant> (or <input>/)."
         ),
     )
 
@@ -1082,7 +1094,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "Text file containing odd particle names/PDGs. "
-            "Optional in pipeline mode when <input>/odd_particles.txt exists."
+            "In pipeline mode defaults to "
+            "<input>/<variant>/odd_particles.txt, then "
+            "<input>/odd_particles.txt."
         ),
     )
 
@@ -1090,9 +1104,9 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         help=(
-            "Destination standalone_cpp directory. "
-            "Default with --build-dir: "
-            "<build>/generated/<UFO-name>_standalone."
+            "Destination standalone_cpp directory. Default in pipeline mode: "
+            "<build>/output/<variant>/<UFO-name>_standalone when a variant "
+            "is set, otherwise <build>/generated/<UFO-name>_standalone."
         ),
     )
 
@@ -1175,29 +1189,36 @@ def parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
-
 # ---------------------------------------------------------------------------
 # Runtime resolution
 # ---------------------------------------------------------------------------
+def _env_path(name: str) -> Optional[Path]:
+    """Return an environment variable as an expanded Path, or None."""
+    value = os.environ.get(name)
+    if not value:
+        return None
+    return Path(value).expanduser().resolve()
+
 
 def resolve_runtime_inputs(
     args: argparse.Namespace,
 ) -> dict:
+    # ------------------------------------------------------------------
+    # Build directory: explicit flag  >  $BUILD_DIR
+    # ------------------------------------------------------------------
     build_dir: Optional[Path] = None
 
     if args.build_dir is not None:
-        build_dir = (
-            args.build_dir
-            .expanduser()
-            .resolve()
-        )
+        build_dir = args.build_dir.expanduser().resolve()
+    else:
+        build_dir = _env_path("BUILD_DIR")
 
+    if build_dir is not None:
         if not build_dir.is_dir():
             die(
                 f"Configured build directory does not exist: "
                 f"{build_dir}"
             )
-
         if not (
             (build_dir / "CMakeCache.txt").is_file()
             or (build_dir / "Makefile").is_file()
@@ -1207,32 +1228,52 @@ def resolve_runtime_inputs(
                 "build directory (CMakeCache.txt/Makefile not found)."
             )
 
+    # ------------------------------------------------------------------
+    # Variant: explicit flag  >  $VARIANT
+    # ------------------------------------------------------------------
+    variant: Optional[str] = args.variant
+    if variant is None:
+        env_variant = os.environ.get("VARIANT")
+        if env_variant:
+            variant = env_variant
+
+    # ------------------------------------------------------------------
+    # Input directory: explicit flag  >  $INPUT_DIR  >  <build>/input
+    # ------------------------------------------------------------------
     input_dir: Optional[Path] = None
 
     if args.input_dir is not None:
-        input_dir = (
-            args.input_dir
-            .expanduser()
-            .resolve()
-        )
-    elif build_dir is not None:
-        input_dir = (
-            build_dir / "input"
-        ).resolve()
+        input_dir = args.input_dir.expanduser().resolve()
+    else:
+        input_dir = _env_path("INPUT_DIR")
+        if input_dir is None and build_dir is not None:
+            input_dir = (build_dir / "input").resolve()
 
-    # MadGraph root: explicit > environment/cache from build.
+    # ------------------------------------------------------------------
+    # Variant root: <input>/<variant> if variant is set, else <input>
+    # ------------------------------------------------------------------
+    variant_root: Optional[Path] = None
+    if input_dir is not None:
+        if variant:
+            candidate = input_dir / variant
+            if not candidate.is_dir():
+                die(
+                    f"Variant directory does not exist: {candidate}. "
+                    "Create it or pass --variant /path/to/other."
+                )
+            variant_root = candidate.resolve()
+        else:
+            variant_root = input_dir
+
+    # ------------------------------------------------------------------
+    # MadGraph root: explicit flag  >  env  >  CMakeCache discovery
+    # ------------------------------------------------------------------
     mg5_root: Optional[Path]
 
     if args.mg5_root is not None:
-        mg5_root = (
-            args.mg5_root
-            .expanduser()
-            .resolve()
-        )
+        mg5_root = args.mg5_root.expanduser().resolve()
     elif build_dir is not None:
-        mg5_root = infer_mg5_root_from_build(
-            build_dir
-        )
+        mg5_root = infer_mg5_root_from_build(build_dir)
     else:
         mg5_root = None
 
@@ -1243,80 +1284,81 @@ def resolve_runtime_inputs(
             "contains the MadGraph path."
         )
 
-    # UFO: explicit > discover from pipeline input.
+    # ------------------------------------------------------------------
+    # UFO: explicit flag  >  discover from variant_root
+    # ------------------------------------------------------------------
     if args.ufo is not None:
-        ufo_dir = validate_ufo_dir(
-            args.ufo
-        )
-    elif input_dir is not None:
-        ufo_dir = discover_ufo_from_input(
-            input_dir
-        )
+        ufo_dir = validate_ufo_dir(args.ufo)
+    elif variant_root is not None:
+        ufo_dir = discover_ufo_from_input(variant_root)
     else:
         die(
-            "No UFO model was specified. Pass --ufo or use --build-dir/"
-            "--input-dir with exactly one UFO model in the input directory."
+            "No UFO model was specified. Pass --ufo or use "
+            "--build-dir/--input-dir/--variant with exactly one UFO "
+            "model in the variant directory."
         )
 
-    # Odd file: explicit --odd and/or explicit/discovered file.
+    # ------------------------------------------------------------------
+    # Odd file: explicit  >  discovered under variant_root  >  input_dir
+    # ------------------------------------------------------------------
     odd_file = (
-        args.odd_file
-        .expanduser()
-        .resolve()
+        args.odd_file.expanduser().resolve()
         if args.odd_file is not None
         else None
     )
 
-    if (
-        odd_file is None
-        and not args.odd
-        and input_dir is not None
-    ):
-        odd_file = discover_odd_file(
-            input_dir
-        )
+    if odd_file is None and not args.odd:
+        if variant_root is not None:
+            odd_file = discover_odd_file(variant_root)
+        if odd_file is None and input_dir is not None and input_dir != variant_root:
+            odd_file = discover_odd_file(input_dir)
 
-    # Output: explicit > build/generated/<model>_standalone.
+    # ------------------------------------------------------------------
+    # Output: explicit  >  <build>/output/<variant>/<UFO>_standalone
+    #                   >  <build>/generated/<UFO>_standalone
+    # ------------------------------------------------------------------
     if args.output is not None:
-        output_dir = (
-            args.output
-            .expanduser()
-            .resolve()
-        )
+        output_dir = args.output.expanduser().resolve()
     elif build_dir is not None:
-        output_dir = (
-            build_dir
-            / "generated"
-            / f"{ufo_dir.name}_standalone"
-        ).resolve()
+        if variant:
+            output_dir = (
+                build_dir
+                / "output"
+                / variant
+                / f"{ufo_dir.name}_standalone"
+            ).resolve()
+        else:
+            output_dir = (
+                build_dir
+                / "generated"
+                / f"{ufo_dir.name}_standalone"
+            ).resolve()
     else:
         die(
             "No output directory was specified. Pass --output, or use "
-            "--build-dir to receive the default <build>/generated output."
+            "--build-dir to receive the default <build>/output/<variant> "
+            "output."
         )
 
     return {
-        "build_dir": build_dir,
-        "input_dir": input_dir,
-        "mg5_root": mg5_root,
-        "ufo_dir": ufo_dir,
-        "odd_file": odd_file,
-        "output_dir": output_dir,
+        "build_dir":    build_dir,
+        "input_dir":    input_dir,
+        "variant":      variant,
+        "variant_root": variant_root,
+        "mg5_root":     mg5_root,
+        "ufo_dir":      ufo_dir,
+        "odd_file":     odd_file,
+        "output_dir":   output_dir,
     }
-
 
 def main() -> int:
     args = parse_args()
-    runtime = resolve_runtime_inputs(
-        args
-    )
+    runtime = resolve_runtime_inputs(args)
 
-    build_dir: Optional[Path] = (
-        runtime["build_dir"]
-    )
-    input_dir: Optional[Path] = (
-        runtime["input_dir"]
-    )
+    build_dir:   Optional[Path] = runtime["build_dir"]
+    input_dir:   Optional[Path] = runtime["input_dir"]
+    variant:     Optional[str]  = runtime.get("variant")
+    variant_root: Optional[Path] = runtime.get("variant_root")
     mg5_root: Path = (
         runtime["mg5_root"]
     )
@@ -1653,6 +1695,10 @@ def main() -> int:
             None
             if input_dir is None
             else str(input_dir)
+        ),
+        "variant": variant,
+        "variant_root": (
+            None if variant_root is None else str(variant_root)
         ),
         "mg5_root": str(
             mg5_root

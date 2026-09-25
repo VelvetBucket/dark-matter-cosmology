@@ -591,7 +591,7 @@ def print_particle_table(species):
         f"{'#':>{index_width}}   "
         f"{'Particle':<{name_width}}"
         f"{'PDG':>12}"
-        f"{'Charge':>10}"
+        f"{'3*Charge':>10}"
         f"{'Spin':>10}"
         f"{'Mass':>15}"
         f"{'DOF':>8}"
@@ -605,7 +605,7 @@ def print_particle_table(species):
         display_name = particle_display_name(particle)
 
         pdg = format_number(particle["pdg"])
-        charge = format_number(particle["charge"])
+        charge3 = format_number(3*particle["charge"])
         spin = ufo_spin_to_physical(particle["spin"])
         mass = particle["mass"] or "-"
         dof = (
@@ -618,7 +618,7 @@ def print_particle_table(species):
             f"{index:>{index_width}}   "
             f"{display_name:<{name_width}}"
             f"{pdg:>12}"
-            f"{charge:>10}"
+            f"{charge3:>10}"
             f"{spin:>10}"
             f"{mass:>15}"
             f"{dof:>8}"
