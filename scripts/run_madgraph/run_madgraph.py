@@ -1136,9 +1136,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--group-subprocesses",
         action="store_true",
+        default=True,
         help=(
-            "Allow MG5 subprocess grouping. Default is False to preserve "
-            "transparent P* process directories for downstream selection."
+            "Allow MG5 subprocess grouping."
         ),
     )
 
