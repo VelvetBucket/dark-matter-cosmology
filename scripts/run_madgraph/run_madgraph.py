@@ -1838,20 +1838,15 @@ def main() -> int:
         )
 
     print()
-    print(
-        "This directory is the MG5 output root expected by the "
-        "current selector/Kerrigan pipeline."
+
+    print()
+    print("Generated MG5 output root:")
+    print(f"  {output_dir}")
+    print()
+    print("This MG5 output root is the standalone_cpp directory expected by "
+    "run_ui/Kerrigan."
     )
     print()
-    print(
-        "Next-step paths:"
-    )
-    print(
-        f"  --mg5-output {output_dir}"
-    )
-    print(
-        f"  --subprocesses {output_dir / 'SubProcesses'}"
-    )
 
     return 0
 
