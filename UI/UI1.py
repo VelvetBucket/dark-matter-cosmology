@@ -577,8 +577,6 @@ def print_particle_table(species):
     print("Available physical particle species:")
     print()
 
-    index_width = len(str(len(species)))
-
     name_width = max(
         20,
         max(
@@ -588,10 +586,9 @@ def print_particle_table(species):
     )
 
     header = (
-        f"{'#':>{index_width}}   "
         f"{'Particle':<{name_width}}"
         f"{'PDG':>12}"
-        f"{'3*Charge':>10}"
+        f"{'Charge':>10}"
         f"{'Spin':>10}"
         f"{'Mass':>15}"
         f"{'DOF':>8}"
@@ -600,12 +597,12 @@ def print_particle_table(species):
     print(header)
     print("-" * len(header))
 
-    for index, particle in enumerate(species, start=1):
+    for particle in species:
 
         display_name = particle_display_name(particle)
 
         pdg = format_number(particle["pdg"])
-        charge3 = format_number(3*particle["charge"])
+        charge = format_number(particle["charge"])
         spin = ufo_spin_to_physical(particle["spin"])
         mass = particle["mass"] or "-"
         dof = (
@@ -615,10 +612,9 @@ def print_particle_table(species):
         )
 
         print(
-            f"{index:>{index_width}}   "
             f"{display_name:<{name_width}}"
             f"{pdg:>12}"
-            f"{charge3:>10}"
+            f"{charge:>10}"
             f"{spin:>10}"
             f"{mass:>15}"
             f"{dof:>8}"
@@ -626,80 +622,93 @@ def print_particle_table(species):
 
     print()
 
-
 # ============================================================
 # User selection
 # ============================================================
 
-def parse_selection(text, maximum):
+def parse_selection(text, species):
     """
-    Accepted formats:
+    Select physical particle species using either:
 
-        3 5 7
-        3,5,7
-        3 5-8
-        3, 5-8, 11
+      - UFO/MadGraph particle names
+      - PDG codes
+
+    Examples:
+
+        N1 N2 N3 etp etI etR
+        1012 1014 1016 1003 1002 1001
+        N1, N2, 1003, etI
+
+    For a particle-antiparticle species, either the particle or
+    antiparticle name/PDG selects the same physical species.
     """
-    text = text.replace(",", " ")
 
-    selected = []
+    tokens = text.replace(",", " ").split()
 
-    for token in text.split():
-
-        if "-" in token:
-            pieces = token.split("-")
-
-            if len(pieces) != 2:
-                raise ValueError(
-                    f"Invalid range: {token}"
-                )
-
-            try:
-                start = int(pieces[0])
-                end = int(pieces[1])
-
-            except ValueError:
-                raise ValueError(
-                    f"Invalid range: {token}"
-                )
-
-            if start > end:
-                raise ValueError(
-                    f"Invalid range: {token}"
-                )
-
-            for number in range(start, end + 1):
-                selected.append(number)
-
-        else:
-            try:
-                selected.append(int(token))
-
-            except ValueError:
-                raise ValueError(
-                    f"Invalid selection: {token}"
-                )
-
-    if not selected:
+    if not tokens:
         raise ValueError(
             "No particles were selected."
         )
 
-    invalid = [
-        number
-        for number in selected
-        if number < 1 or number > maximum
-    ]
+    by_name = {}
+    by_pdg = {}
 
-    if invalid:
-        raise ValueError(
-            "Particle number out of range: "
-            + ", ".join(map(str, invalid))
+    for particle in species:
+
+        name = particle["name"]
+        antiname = particle["antiname"]
+        pdg = particle["pdg"]
+
+        # Accept both particle and antiparticle MadGraph names.
+        by_name[name] = particle
+        by_name[antiname] = particle
+
+        # Accept both signs of the PDG for a
+        # particle-antiparticle species.
+        if pdg is not None:
+            pdg = int(pdg)
+
+            by_pdg[pdg] = particle
+
+            if name != antiname:
+                by_pdg[-pdg] = particle
+
+    selected = []
+    seen = set()
+
+    for token in tokens:
+
+        particle = by_name.get(token)
+
+        if particle is None:
+            try:
+                pdg = int(token)
+            except ValueError:
+                pdg = None
+
+            if pdg is not None:
+                particle = by_pdg.get(pdg)
+
+        if particle is None:
+            raise ValueError(
+                f"Unknown particle: {token}. "
+                "Enter a UFO/MadGraph particle name or a PDG code "
+                "shown in the table."
+            )
+
+        # One row in odd_particles.txt corresponds to one
+        # physical species, so particle/antiparticle inputs
+        # must not create duplicates.
+        key = (
+            particle["name"],
+            particle["antiname"],
         )
 
-    # Remove duplicates while preserving order
-    return list(dict.fromkeys(selected))
+        if key not in seen:
+            seen.add(key)
+            selected.append(particle)
 
+    return selected
 
 def validate_selected_dof(selected):
     """
@@ -729,7 +738,6 @@ def validate_selected_dof(selected):
         "0, 1/2 and 1."
     )
 
-
 def ask_selection(species):
     while True:
         print(
@@ -737,28 +745,23 @@ def ask_selection(species):
         )
         print()
         print(
-            "Enter particle numbers separated by spaces or commas."
+            "Enter UFO/MadGraph particle names or PDG codes "
+            "separated by spaces or commas."
         )
-        print("Ranges are also accepted.")
         print()
         print("Examples:")
-        print("  14 15 16 19")
-        print("  14-19")
-        print("  14-16, 19")
+        print("  N1 N2 N3 etp etI etR")
+        print("  1012 1014 1016 1003 1002 1001")
+        print("  N1, N2, 1003, etI, etR")
         print()
 
         answer = input("> ").strip()
 
         try:
-            indices = parse_selection(
+            selected = parse_selection(
                 answer,
-                len(species)
+                species,
             )
-
-            selected = [
-                species[index - 1]
-                for index in indices
-            ]
 
             validate_selected_dof(selected)
 
@@ -768,7 +771,6 @@ def ask_selection(species):
             print()
             print(f"Error: {exc}")
             print()
-
 
 def confirm_selection(selected):
     print()
