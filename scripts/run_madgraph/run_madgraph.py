@@ -1116,11 +1116,11 @@ def parse_args() -> argparse.Namespace:
             "multiparticle",
             "explicit",
         ),
-        default="multiparticle",
+        default="explicit",
         help=(
-            "multiparticle (default): one generate command using "
-            "dm_odd/dm_even. explicit: one generate plus add-process "
-            "commands for every unordered odd-particle initial pair."
+            "explicit (default): generate each unordered odd particle "
+            "initial pair exactly once. "
+            "multiparticle: use one generate command with dm_odd/dm_even."
         ),
     )
 
@@ -1136,9 +1136,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--group-subprocesses",
         action="store_true",
-        default=True,
         help=(
             "Allow MG5 subprocess grouping."
+            "Default: disabled so subprocess directories remain explicit."
         ),
     )
 
