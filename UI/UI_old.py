@@ -1,44 +1,37 @@
 #!/usr/bin/env python3
 """
-UI2 - Scotogenic subprocess selector and physics orchestrator.
+Scotogenic subprocess selector and UI/orchestrator (v3).
 
-Normal use is intentionally short.  UI2 auto-discovers the selected model
-layout (param_cards, SubProcesses, Build/build, effective_SubProcesses and
-back_up) relative to this file/project, so those paths do not need to be typed
-on every run.  When more than one model layout exists, choose it with
---model 1 / --model 2 (or interactively).  A parameter card is then resolved
-inside that SAME model layout; UI2 rejects a card from another model root to
-avoid mixing model-1 inputs with model-2 SubProcesses.
-
-Selection modes:
+Two user-facing selection modes are provided:
 
 1. combined
-   Performs a THERMAL PRESELECTION of possible coannihilators.  x_f=m_DM/T
-   defaults to 25 and enters the equilibrium-density ratio
-
-       n_i^eq / n_DM^eq
-         ~= (g_i/g_DM) (m_i/m_DM)^(3/2) exp[-x_f Delta_i].
-
-   A state must pass both the relative mass-splitting cut and the equilibrium
-   abundance/Boltzmann-suppression cut.  This is deliberately only a
-   preselection: a state that passes these cuts is not guaranteed to matter
-   dynamically.  Its actual importance requires sigma-v information.
+   Keeps the original automatic effective-dark-sector selection.  The
+   freeze-out reference x_f is configurable with --xf and defaults to 25.
 
 2. pdg
-   Manual selection.  The first PDG is the dark-matter candidate and later
-   PDGs request candidate-partner coannihilation channels.
+   The first supplied PDG is the dark-matter candidate.  Candidate-candidate
+   annihilation channels are always selected; each additional PDG requests
+   candidate-partner coannihilation channels.  The program validates each
+   requested pair against the actual SubProcesses directories, so impossible
+   or unavailable interactions are reported and skipped.
 
-After selection, both relic-density and sigma-v tasks are delegated to the
-CMake-generated Kerrigan.sh runtime.  --task sigmav computes sigmaV/TOTALS_T
-for the thermally/manual selected set; UI2 does NOT currently use sigma-v as an
-automatic pruning gate because this file has no validated per-process sigma-v
-contribution parser/threshold.  Therefore the report explicitly distinguishes
-thermal preselection from final dynamical relevance.
+The selected folders are copied from SubProcesses into effective_SubProcesses;
+SubProcesses itself is never moved or deleted.  The previous effective
+selection is replaced by default, or preserved under back_up/ when --backup
+is enabled.
 
-The external calculation is executed with its working directory set to the
-resolved Build/build directory.  UI2 prints that exact directory before and
-after the run so messages such as 'This directory ...' from run_madgraph are
-unambiguous.
+After selection, both physics tasks are delegated to the CMake-configured
+Kerrigan.sh runtime.  --task relic asks Kerrigan for the density pipeline, while
+--task sigmav asks the same Kerrigan runtime to stop after sigmaV/TOTALS_T.
+The selector never calls mind_master.sh directly.  A precise Bash regex built
+from exactly the selected process folders is passed to Kerrigan so the physics
+run uses the same selection shown by the UI.
+
+The parameter card may be given as an absolute/relative file path or as a file
+name together with --cards-dir.  The same information can be supplied through
+a text input file.  The CMake build directory can be supplied with --build-dir;
+the program then executes the generated build/scripts/Kerrigan.sh, never the
+raw Kerrigan.sh.in template.
 """
 
 from __future__ import annotations
@@ -104,21 +97,6 @@ SCOTOGENIC_DOF: dict[int, float] = {
 
 PROCESS_MARKER = "_UFO_"
 
-DEFAULT_XF = 25.0
-DEFAULT_MAX_DELTA = 0.25
-DEFAULT_MIN_RELATIVE_WEIGHT = 1.0e-3
-DEFAULT_WIDTH_TOLERANCE = 1.0e-30
-
-MODEL_DIR_PATTERNS: dict[str, tuple[str, ...]] = {
-    "1": ("Model1", "model1", "Model_1", "model_1", "Modelo1", "modelo1", "Modelo_1", "modelo_1"),
-    "2": ("Model2", "model2", "Model_2", "model_2", "Modelo2", "modelo2", "Modelo_2", "modelo_2"),
-}
-
-PARAM_CARD_DIR_NAMES: tuple[str, ...] = (
-    "param_cards", "ParamCards", "paramcards", "cards", "Cards"
-)
-BUILD_DIR_NAMES: tuple[str, ...] = ("Build", "build")
-
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -155,18 +133,6 @@ class ProcessRecord:
     final_compact: str
     category: str
     selected: bool
-
-
-@dataclass(frozen=True)
-class RuntimeLayout:
-    model_label: str
-    model_root: Path
-    cards_dir: Optional[Path]
-    subprocesses_dir: Path
-    output_dir: Path
-    backup_root: Path
-    build_dir: Optional[Path]
-    strict_model_binding: bool
 
 
 # ---------------------------------------------------------------------------
@@ -524,7 +490,7 @@ def build_effective_dark_sector(
             )
         else:
             included = True
-            reason = "thermal preselection passed; sigmaV relevance pending"
+            reason = "mass-close and thermally relevant"
             active_pdgs.add(particle.pdg)
 
         decisions.append(
@@ -549,7 +515,7 @@ def print_dark_sector_table(
     max_delta: float,
     min_relative_weight: float,
 ) -> None:
-    print("\nPreselección térmica del sector oscuro")
+    print("\nValidación del sector oscuro efectivo")
     print(
         f"x_ref={x_ref:g}, max_delta={max_delta:g}, "
         f"min_relative_weight={min_relative_weight:g}"
@@ -558,7 +524,7 @@ def print_dark_sector_table(
     print(
         f"{'PDG':>8}  {'nombre':<10} {'masa [GeV]':>16} "
         f"{'Delta':>13} {'peso eq. relativo':>19} "
-        f"{'preselect.':>10}  motivo"
+        f"{'activo':>8}  motivo"
     )
     print("-" * 116)
 
@@ -570,7 +536,7 @@ def print_dark_sector_table(
             f"{decision.mass:>16.8e} "
             f"{decision.delta_mass:>13.5e} "
             f"{decision.relative_eq_weight:>19.5e} "
-            f"{active_text:>10}  "
+            f"{active_text:>8}  "
             f"{decision.reason}"
         )
 
@@ -977,18 +943,16 @@ def load_input_file(path: Path) -> dict[str, object]:
 
     or a key/value block such as:
 
-        model = 1
-        param_card = param_card_model1.dat
         mode = pdg
+        cards_dir = /path/to/cards
+        param_card = para_card1.dat
+        build_dir = /path/to/project/build
+        mg5_output = /path/to/MG5/scotogenic
         pdgs = 1012 1014 1001
         xf = 28
         verbose = yes
         backup = no
         task = relic
-
-    Normal UI2 use no longer needs cards_dir/SubProcesses/Build paths when
-    they follow the model layout. Advanced path keys remain available as
-    explicit overrides.
 
     CLI arguments override values from this file.
     """
@@ -1019,10 +983,6 @@ def load_input_file(path: Path) -> dict[str, object]:
         "physics-output": "physics_output_root",
         "output_root": "physics_output_root",
         "run_output": "physics_output_root",
-        "model_id": "model",
-        "modelo": "model",
-        "root": "project_root",
-        "project-root": "project_root",
     }
 
     with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -1076,269 +1036,6 @@ def resolve_runtime_path(value: object, default: Path) -> Path:
     if value is None:
         return default.expanduser().resolve()
     return Path(str(value)).expanduser().resolve()
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _first_existing_dir(root: Path, relative_candidates: tuple[str, ...]) -> Optional[Path]:
-    for relative in relative_candidates:
-        candidate = (root / relative).resolve()
-        if candidate.is_dir():
-            return candidate
-    return None
-
-
-def _looks_like_model_root(root: Path) -> bool:
-    if not root.is_dir():
-        return False
-    has_subprocesses = any(
-        (root / rel).is_dir()
-        for rel in ("SubProcesses", "MG5/SubProcesses", "MadGraph/SubProcesses")
-    )
-    has_cards = any((root / name).is_dir() for name in PARAM_CARD_DIR_NAMES)
-    has_build = any((root / name).is_dir() for name in BUILD_DIR_NAMES)
-    return has_subprocesses or (has_cards and has_build)
-
-
-def _model_root_candidates(project_root: Path, model_value: str) -> list[Path]:
-    raw = Path(model_value).expanduser()
-    candidates: list[Path] = []
-    if raw.is_absolute() or raw.parts and len(raw.parts) > 1:
-        candidates.append(raw.resolve())
-
-    names = MODEL_DIR_PATTERNS.get(str(model_value).strip(), (str(model_value).strip(),))
-    for base in (project_root, project_root.parent):
-        for name in names:
-            candidates.append((base / name).resolve())
-
-    result: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if _looks_like_model_root(candidate):
-            result.append(candidate)
-    return result
-
-
-def _discover_named_model_roots(project_root: Path) -> list[Path]:
-    roots: list[Path] = []
-    seen: set[Path] = set()
-    for base in (project_root, project_root.parent):
-        for names in MODEL_DIR_PATTERNS.values():
-            for name in names:
-                candidate = (base / name).resolve()
-                if candidate in seen:
-                    continue
-                seen.add(candidate)
-                if _looks_like_model_root(candidate):
-                    roots.append(candidate)
-    return roots
-
-
-def _choose_interactively(title: str, paths: list[Path]) -> Path:
-    print(f"\n{title}")
-    for index, path in enumerate(paths, start=1):
-        print(f"  {index}. {path}")
-    while True:
-        answer = input("Seleccione una opción por número: ").strip()
-        try:
-            selected = int(answer)
-        except ValueError:
-            selected = 0
-        if 1 <= selected <= len(paths):
-            return paths[selected - 1]
-        print("Opción inválida.")
-
-
-def discover_runtime_layout(
-    script_root: Path,
-    model_value: Optional[object],
-    project_root_value: Optional[object],
-) -> RuntimeLayout:
-    """Resolve the normal UI2 layout once, instead of asking for every path."""
-    project_root = (
-        Path(str(project_root_value)).expanduser().resolve()
-        if project_root_value is not None
-        else script_root.resolve()
-    )
-
-    strict_binding = model_value is not None
-    if model_value is not None:
-        matches = _model_root_candidates(project_root, str(model_value))
-        if len(matches) == 0:
-            expected = ", ".join(MODEL_DIR_PATTERNS.get(str(model_value), (str(model_value),)))
-            raise FileNotFoundError(
-                f"No pude localizar el modelo {model_value!r}. "
-                f"Busqué directorios tipo: {expected} bajo {project_root} y {project_root.parent}. "
-                "También puede pasar la ruta del modelo directamente con --model /ruta/al/modelo."
-            )
-        if len(matches) > 1:
-            if not sys.stdin.isatty():
-                raise ValueError(
-                    "Se encontraron varios roots compatibles para --model; use una ruta explícita. "
-                    + "; ".join(str(path) for path in matches)
-                )
-            model_root = _choose_interactively("Se encontraron varios roots para el modelo:", matches)
-        else:
-            model_root = matches[0]
-        model_label = str(model_value)
-    else:
-        # If the script already lives in a complete model root, keep the legacy
-        # one-folder workflow.  Otherwise detect Model1/Model2 and force a choice
-        # when both are present so cards and SubProcesses cannot be mixed silently.
-        if _looks_like_model_root(script_root):
-            model_root = script_root.resolve()
-            model_label = model_root.name
-        else:
-            discovered = _discover_named_model_roots(project_root)
-            if len(discovered) == 1:
-                model_root = discovered[0]
-                model_label = model_root.name
-                strict_binding = True
-            elif len(discovered) > 1:
-                if not sys.stdin.isatty():
-                    raise ValueError(
-                        "Hay varios modelos disponibles. Use --model 1 / --model 2 "
-                        "para fijar explícitamente el modelo y evitar mezclar param_cards."
-                    )
-                model_root = _choose_interactively(
-                    "UI2 detectó varios modelos; elija uno para mantener card/SubProcesses ligados:",
-                    discovered,
-                )
-                model_label = model_root.name
-                strict_binding = True
-            else:
-                model_root = script_root.resolve()
-                model_label = model_root.name
-
-    cards_dir = _first_existing_dir(model_root, PARAM_CARD_DIR_NAMES)
-    subprocesses_dir = _first_existing_dir(
-        model_root,
-        ("SubProcesses", "MG5/SubProcesses", "MadGraph/SubProcesses"),
-    )
-    if subprocesses_dir is None:
-        subprocesses_dir = (model_root / "SubProcesses").resolve()
-
-    build_dir = _first_existing_dir(model_root, BUILD_DIR_NAMES)
-    if build_dir is None:
-        # A shared project Build is allowed; unlike the param_card, it does not
-        # define the model physics input.
-        build_dir = _first_existing_dir(model_root.parent, BUILD_DIR_NAMES)
-
-    output_dir = (subprocesses_dir.parent / "effective_SubProcesses").resolve()
-    backup_root = (subprocesses_dir.parent / "back_up").resolve()
-
-    return RuntimeLayout(
-        model_label=model_label,
-        model_root=model_root,
-        cards_dir=cards_dir,
-        subprocesses_dir=subprocesses_dir,
-        output_dir=output_dir,
-        backup_root=backup_root,
-        build_dir=build_dir,
-        strict_model_binding=strict_binding,
-    )
-
-
-def list_param_cards(cards_dir: Path) -> list[Path]:
-    preferred = sorted(cards_dir.glob("param_card*.dat"))
-    if preferred:
-        return [path.resolve() for path in preferred if path.is_file()]
-    broader = sorted(cards_dir.glob("*.dat"))
-    return [path.resolve() for path in broader if path.is_file()]
-
-
-def resolve_ui2_param_card(
-    requested: Optional[object],
-    layout: RuntimeLayout,
-    explicit_cards_dir: Optional[Path],
-    config_dir: Optional[Path],
-) -> Path:
-    cards_dir = explicit_cards_dir or layout.cards_dir
-
-    if requested is None:
-        if cards_dir is None or not cards_dir.is_dir():
-            raise ValueError(
-                "UI2 no encontró un directorio de param_cards en el modelo seleccionado. "
-                "Use un nombre/ruta de param_card o el override avanzado --cards-dir."
-            )
-        cards = list_param_cards(cards_dir)
-        if not cards:
-            raise FileNotFoundError(f"No encontré param_cards .dat dentro de {cards_dir}")
-        if len(cards) == 1:
-            card = cards[0]
-        elif sys.stdin.isatty():
-            card = _choose_interactively(
-                f"Se encontraron {len(cards)} param_cards en {cards_dir}:",
-                cards,
-            )
-        else:
-            raise ValueError(
-                "Hay varios param_cards posibles. Indique uno por nombre o ruta para una ejecución no interactiva."
-            )
-    else:
-        card = resolve_param_card_path(requested, cards_dir=cards_dir, config_dir=config_dir)
-
-    if layout.strict_model_binding and not _is_within(card, layout.model_root):
-        raise ValueError(
-            "MODEL_PARAM_CARD_MISMATCH: el param_card seleccionado no pertenece al mismo "
-            f"modelo que SubProcesses. Modelo={layout.model_root}; card={card}. "
-            "Esto bloquea explícitamente usar una card del modelo 1 con el modelo 2 (o viceversa)."
-        )
-
-    return card.resolve()
-
-
-def print_runtime_layout(layout: RuntimeLayout, param_card: Path, build_dir: Path) -> None:
-    print("\nLayout resuelto por UI2")
-    print("-" * 88)
-    print(f"Modelo             : {layout.model_label}")
-    print(f"Model root         : {layout.model_root}")
-    print(f"param_card         : {param_card}")
-    print(f"SubProcesses       : {layout.subprocesses_dir}")
-    print(f"Build              : {build_dir}")
-    print(f"effective output   : {layout.output_dir}")
-    print("Binding card/model : " + ("STRICT" if layout.strict_model_binding else "legacy/local"))
-    print("-" * 88)
-
-
-def print_combined_selection_criteria(
-    xf: float,
-    max_delta: float,
-    min_relative_weight: float,
-) -> None:
-    print("\nCriterios de preselección de coaniquiladores (modo combined)")
-    print("-" * 100)
-    print(
-        f"1) Cercanía de masa: Delta_i=(m_i-m_DM)/m_DM <= {max_delta:g}. "
-        "Esto elimina estados demasiado separados en masa."
-    )
-    print(
-        "2) Supresión térmica / abundancia de equilibrio: "
-        "n_i^eq/n_DM^eq = (g_i/g_DM)(1+Delta_i)^(3/2) exp[-x_f Delta_i]."
-    )
-    print(
-        f"   UI2 usa x_f={xf:g} y exige n_i^eq/n_DM^eq >= {min_relative_weight:g}. "
-        "x_f=m_DM/T: a mayor x_f, mayor supresión de Boltzmann para el mismo Delta_i."
-    )
-    print(
-        "3) Relevancia dinámica: requiere sigma-v. Este UI2 NO usa sigma-v como gate automático "
-        "de selección; --task sigmav lo calcula DESPUÉS de esta preselección térmica."
-    )
-    print(
-        "   Por tanto, 'incluido' aquí significa candidato térmicamente plausible, no una "
-        "coaniquilación final demostrada. Para podar por sigma-v hace falta definir y validar "
-        "un parser/umbral de contribución por proceso."
-    )
-    print("-" * 100)
 
 
 def unique_pdgs(values: list[int]) -> list[int]:
@@ -1812,11 +1509,8 @@ def resolve_cmake_kerrigan(
         # Conservative auto-discovery for common source/build layouts.
         candidate_paths.extend(
             [
-                script_root / "Build" / "scripts" / "Kerrigan.sh",
                 script_root / "build" / "scripts" / "Kerrigan.sh",
-                script_root.parent / "Build" / "scripts" / "Kerrigan.sh",
                 script_root.parent / "build" / "scripts" / "Kerrigan.sh",
-                script_root / "../Build/scripts/Kerrigan.sh",
                 script_root / "../build/scripts/Kerrigan.sh",
             ]
         )
@@ -1924,8 +1618,6 @@ def run_kerrigan(
     environment["KERRIGAN_CANDIDATE_PDG"] = str(candidate.pdg)
     environment["KERRIGAN_SELECTION_REPORT"] = str(selection_report.resolve())
 
-    working_dir = (build_dir if build_dir.is_dir() else kerrigan.parent).resolve()
-
     if verbose:
         print("\nIniciando cálculo con Kerrigan generado por CMake")
         print(f"Kerrigan runtime   : {kerrigan}")
@@ -1945,21 +1637,12 @@ def run_kerrigan(
         if physics_output_root is not None:
             print(f"Physics output root: {physics_output_root}")
 
-    print(f"Directorio de trabajo de Kerrigan/run_madgraph: {working_dir}")
-    print(
-        "Nota: cualquier mensaje externo del tipo 'This directory ...' se refiere "
-        "al directorio de trabajo mostrado arriba."
-    )
-
     subprocess.run(
         command,
-        cwd=working_dir,
+        cwd=build_dir if build_dir.is_dir() else kerrigan.parent,
         env=environment,
         check=True,
     )
-
-    print("\nCálculo externo completado correctamente.")
-    print(f"Directorio usado por Kerrigan/run_madgraph: {working_dir}")
 
 def build_parser() -> argparse.ArgumentParser:
     script_root = Path(__file__).resolve().parent
@@ -1977,9 +1660,8 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         type=Path,
         help=(
-            "Optional parameter-card filename/path. Normally UI2 finds the selected "
-            "model's param_cards directory and auto-selects the only card or asks you "
-            "to choose when several exist."
+            "Parameter-card path or filename. With --cards-dir, a bare filename is "
+            "resolved inside that directory. Optional when supplied by --input-file."
         ),
     )
 
@@ -1992,31 +1674,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--model",
-        default=None,
-        help=(
-            "Model selector/root. Normal use: --model 1 or --model 2. "
-            "UI2 then resolves param_cards, SubProcesses and Build from the same model. "
-            "A model-root path is also accepted."
-        ),
-    )
-    parser.add_argument(
-        "--project-root",
-        type=Path,
-        default=None,
-        help=(
-            "Advanced discovery root when Model1/Model2 are not next to UI2.py. "
-            "Usually unnecessary."
-        ),
-    )
-
-    parser.add_argument(
         "--cards-dir",
         "--param-cards-dir",
         dest="cards_dir",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help=(
+            "Directory containing parameter cards. Useful when param_card is only a "
+            "filename. The same option is available as cards_dir=... in --input-file."
+        ),
     )
 
     parser.add_argument(
@@ -2050,8 +1716,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "Advanced override. x_f=m_DM/T used ONLY by the combined thermal "
-            "preselection through exp[-x_f Delta]. In pdg mode it is diagnostic only. "
+            "Freeze-out x_f=m_DM/T used by the combined Boltzmann filter. "
             "Default: 25."
         ),
     )
@@ -2073,7 +1738,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dark-pdgs",
         default=None,
-        help=argparse.SUPPRESS,
+        help=(
+            "Advanced: comma-separated dark-sector PDGs used by combined-mode "
+            "candidate/effective-sector validation."
+        ),
     )
 
     parser.add_argument(
@@ -2118,37 +1786,46 @@ def build_parser() -> argparse.ArgumentParser:
         "--subprocesses",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help=f"Source folder. Default: {script_root / 'SubProcesses'}",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help=f"Selected-process copy. Default: {script_root / 'effective_SubProcesses'}",
     )
     parser.add_argument(
         "--backup-dir",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help=f"Backup root. Default: {script_root / 'back_up'}",
     )
     parser.add_argument(
         "--build-dir",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help=(
+            "CMake build directory. The runtime is resolved as "
+            "<build-dir>/scripts/Kerrigan.sh (preferred)."
+        ),
     )
     parser.add_argument(
         "--kerrigan",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help=(
+            "Explicit path to the Kerrigan.sh GENERATED by CMake. Kerrigan.sh.in "
+            "is rejected as a runtime target."
+        ),
     )
     parser.add_argument(
         "--mg5-output",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help=(
+            "MadGraph output root containing SubProcesses/src. If omitted, it is "
+            "inferred from --subprocesses when possible."
+        ),
     )
     parser.add_argument(
         "--physics-output-root",
@@ -2156,14 +1833,17 @@ def build_parser() -> argparse.ArgumentParser:
         dest="physics_output_root",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help=(
+            "Optional output ROOT passed to Kerrigan. Kerrigan creates a unique "
+            "run directory below it for both relic and sigmav tasks."
+        ),
     )
 
     parser.add_argument(
         "--width-tolerance",
         type=float,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Maximum width treated as stable. Default: 1e-30 GeV.",
     )
     parser.add_argument(
         "--allow-unstable-candidate",
@@ -2220,13 +1900,13 @@ def main() -> int:
     if mode not in {"combined", "pdg"}:
         raise ValueError("mode debe ser 'combined' o 'pdg'.")
 
-    xf = float(config_value(args.xf, file_config, "xf", DEFAULT_XF))
-    max_delta = float(config_value(args.max_delta, file_config, "max_delta", DEFAULT_MAX_DELTA))
+    xf = float(config_value(args.xf, file_config, "xf", 25.0))
+    max_delta = float(config_value(args.max_delta, file_config, "max_delta", 0.25))
     min_relative_weight = float(
-        config_value(args.min_relative_weight, file_config, "min_relative_weight", DEFAULT_MIN_RELATIVE_WEIGHT)
+        config_value(args.min_relative_weight, file_config, "min_relative_weight", 1.0e-3)
     )
     width_tolerance = float(
-        config_value(args.width_tolerance, file_config, "width_tolerance", DEFAULT_WIDTH_TOLERANCE)
+        config_value(args.width_tolerance, file_config, "width_tolerance", 1.0e-30)
     )
     task = str(config_value(args.task, file_config, "task", "relic")).strip().lower()
     task_aliases = {
@@ -2266,15 +1946,7 @@ def main() -> int:
         backup_value = parse_bool(file_config["backup"], "backup")
     backup = bool(backup_value) if backup_value is not None else False
 
-    model_value = config_value(args.model, file_config, "model", None)
-    project_root_value = config_value(args.project_root, file_config, "project_root", None)
-    layout = discover_runtime_layout(
-        script_root=script_root,
-        model_value=model_value,
-        project_root_value=project_root_value,
-    )
-
-    cards_dir_value = config_value(args.cards_dir, file_config, "cards_dir", layout.cards_dir)
+    cards_dir_value = config_value(args.cards_dir, file_config, "cards_dir", None)
     cards_dir: Optional[Path] = None
     if cards_dir_value is not None:
         raw_cards_dir = Path(str(cards_dir_value)).expanduser()
@@ -2284,45 +1956,38 @@ def main() -> int:
             cards_dir = raw_cards_dir.resolve()
         if not cards_dir.is_dir():
             raise FileNotFoundError(f"No existe el directorio de param_cards: {cards_dir}")
-        if layout.strict_model_binding and not _is_within(cards_dir, layout.model_root):
-            raise ValueError(
-                "MODEL_CARDS_DIR_MISMATCH: --cards-dir apunta fuera del modelo seleccionado. "
-                f"Modelo={layout.model_root}; cards_dir={cards_dir}."
-            )
 
-    param_card_value: Optional[object] = args.param_card
+    param_card_value: object = args.param_card
     if param_card_value is None:
         param_card_value = file_config.get("param_card")
-    param_card = resolve_ui2_param_card(
-        requested=param_card_value,
-        layout=layout,
-        explicit_cards_dir=cards_dir,
+    if param_card_value is None:
+        raise ValueError(
+            "Debe proporcionar el param_card como argumento o mediante "
+            "param_card=... en --input-file. Puede añadir --cards-dir/cards_dir=... "
+            "cuando solo quiera escribir el nombre de la card."
+        )
+    param_card = resolve_param_card_path(
+        param_card_value,
+        cards_dir=cards_dir,
         config_dir=config_dir,
     )
 
     subprocesses_dir = resolve_runtime_path(
         config_value(args.subprocesses, file_config, "subprocesses", None),
-        layout.subprocesses_dir,
+        script_root / "SubProcesses",
     )
     output_dir = resolve_runtime_path(
         config_value(args.output, file_config, "output", None),
-        layout.output_dir,
+        script_root / "effective_SubProcesses",
     )
     backup_root = resolve_runtime_path(
         config_value(args.backup_dir, file_config, "backup_dir", None),
-        layout.backup_root,
+        script_root / "back_up",
     )
-
-    if layout.strict_model_binding and not _is_within(subprocesses_dir, layout.model_root):
-        raise ValueError(
-            "MODEL_SUBPROCESSES_MISMATCH: SubProcesses no pertenece al modelo seleccionado. "
-            f"Modelo={layout.model_root}; SubProcesses={subprocesses_dir}."
-        )
-
-    build_dir_value = config_value(args.build_dir, file_config, "build_dir", layout.build_dir)
+    build_dir_value = config_value(args.build_dir, file_config, "build_dir", None)
     explicit_kerrigan = config_value(args.kerrigan, file_config, "kerrigan", None)
     kerrigan, cmake_build_dir = resolve_cmake_kerrigan(
-        script_root=layout.model_root,
+        script_root=script_root,
         explicit_kerrigan=explicit_kerrigan,
         build_dir_value=build_dir_value,
         config_dir=config_dir,
@@ -2347,11 +2012,6 @@ def main() -> int:
         raise FileNotFoundError(f"No existe el param_card: {param_card}")
     if not subprocesses_dir.is_dir():
         raise FileNotFoundError(f"No existe la carpeta SubProcesses: {subprocesses_dir}")
-
-    # Show the binding that prevents card/model cross-contamination before any
-    # physics selection is performed.
-    if verbose:
-        print_runtime_layout(layout, param_card, cmake_build_dir)
 
     read_particles = read_param_card(param_card)
 
@@ -2435,11 +2095,6 @@ def main() -> int:
         mode_warnings: list[str] = []
 
         if verbose:
-            print_combined_selection_criteria(
-                xf=xf,
-                max_delta=max_delta,
-                min_relative_weight=min_relative_weight,
-            )
             print_dark_sector_table(
                 decisions,
                 x_ref=xf,
@@ -2502,11 +2157,6 @@ def main() -> int:
             f"[{mode}] candidato={candidate.name}({candidate.pdg}) | "
             f"procesos={selected_count} | task={task} | xf={xf_label}"
         )
-        if mode == "combined":
-            print(
-                "Nota: la selección combined es una preselección térmica; "
-                "sigma-v todavía no se usa como gate automático de contribución."
-            )
         for warning in warnings:
             print(f"ADVERTENCIA: {warning}")
         for warning in mode_warnings:
@@ -2551,13 +2201,6 @@ def main() -> int:
     )
 
     settings = {
-        "model": layout.model_label,
-        "model_root": str(layout.model_root),
-        "strict_model_binding": layout.strict_model_binding,
-        "selection_stage": (
-            "thermal_preselection_before_sigmav" if mode == "combined" else "manual_pdg_selection"
-        ),
-        "sigmav_filter_applied": False,
         "xf": xf,
         "x_ref": xf,
         "max_delta": max_delta,

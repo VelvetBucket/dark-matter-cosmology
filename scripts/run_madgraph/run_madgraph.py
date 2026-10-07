@@ -858,6 +858,68 @@ def safe_remove_output(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path)
 
+###
+def disable_mg5_auto_update(mg5_root: Path) -> Path:
+    """
+    Disable MadGraph's automatic update check before launching MG5.
+    """
+
+    config_file = (
+        mg5_root
+        / "input"
+        / "mg5_configuration.txt"
+    )
+
+    if not config_file.is_file():
+        die(
+            "Could not disable MadGraph automatic updates because "
+            "the configuration file was not found:\n"
+            f"  {config_file}"
+        )
+
+    text = config_file.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    pattern = re.compile(
+        r"^[ \t]*#?[ \t]*auto_update[ \t]*=.*$",
+        re.MULTILINE,
+    )
+
+    replacement = "auto_update = 0"
+
+    if pattern.search(text):
+        new_text = pattern.sub(
+            replacement,
+            text,
+        )
+    else:
+        if text and not text.endswith("\n"):
+            text += "\n"
+
+        new_text = (
+            text
+            + "\n"
+            + "# Disabled by ExtraDM\n"
+            + "auto_update = 0\n"
+        )
+
+    if new_text != text:
+        try:
+            config_file.write_text(
+                new_text,
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            die(
+                "Could not update the MadGraph configuration file:\n"
+                f"  {config_file}\n\n"
+                f"{exc}"
+            )
+
+    return config_file
+###
 
 def stream_process(
     command: Sequence[str],
@@ -1594,9 +1656,14 @@ def main() -> int:
         # The temporary command card is useful for inspection in dry-run.
         return 0
 
-    print(
-        "\nRunning MadGraph...\n"
-    )
+    ###
+    print("\nPreparing MadGraph configuration...\n")
+
+    mg5_config = disable_mg5_auto_update(mg5_root)
+    print("Automatic updates  : disabled")
+    print(f"MG5 configuration  : {mg5_config}")
+    print("\nRunning MadGraph...\n")
+    ###
 
 ########
     mg5_env = os.environ.copy()
