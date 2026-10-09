@@ -602,7 +602,15 @@ def print_particle_table(species):
         display_name = particle_display_name(particle)
 
         pdg = format_number(particle["pdg"])
-        charge = format_number(particle["charge"])
+
+        ###
+        charge = particle["charge"]
+        if float(charge) % 1 != 0:
+            charge_ui = str(int(3*float(charge))) +  "/3"
+        else:
+            charge_ui = charge
+            
+        ###
         spin = ufo_spin_to_physical(particle["spin"])
         mass = particle["mass"] or "-"
         dof = (
@@ -610,11 +618,11 @@ def print_particle_table(species):
             if particle["dof"] is not None
             else "?"
         )
-
+        
         print(
             f"{display_name:<{name_width}}"
             f"{pdg:>12}"
-            f"{charge:>10}"
+            f"{charge_ui:>10}"
             f"{spin:>10}"
             f"{mass:>15}"
             f"{dof:>8}"
