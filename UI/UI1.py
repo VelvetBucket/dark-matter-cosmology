@@ -588,7 +588,7 @@ def print_particle_table(species):
     header = (
         f"{'Particle':<{name_width}}"
         f"{'PDG':>12}"
-        f"{'3*Charge':>10}"
+        f"{'Charge':>10}"
         f"{'Spin':>10}"
         f"{'Mass':>15}"
         f"{'DOF':>8}"
