@@ -184,7 +184,7 @@ def parse_float(value: str) -> float:
 
 
 def yes_no(prompt: str, default: bool = False) -> bool:
-    suffix = " [S/n]: " if default else " [s/N]: "
+    suffix = " [Y/n]: " if default else " [y/N]: "
     answer = input(prompt + suffix).strip().lower()
 
     if not answer:
@@ -308,20 +308,20 @@ def read_param_card(path: Path) -> list[Particle]:
             particles[pdg].width = width
 
     if not particles:
-        raise ValueError(f"No se encontraron partículas en Block MASS de {path}")
+        raise ValueError(f"No particles were found in Block MASS of {path}")
 
     return list(particles.values())
 
 
 def print_particle_table(read_particles: list[Particle]) -> None:
-    print("\nPartículas leídas del param_card:")
+    print("\nParticles read from the parameter card:")
     print("-" * 78)
-    print(f"{'PDG':>8}  {'nombre':<14} {'masa [GeV]':>18} {'ancho [GeV]':>18}")
+    print(f"{'PDG':>8}  {'name':<14} {'mass [GeV]':>18} {'decay width [GeV]':>18}")
     print("-" * 78)
 
     for particle in read_particles:
         width_text = (
-            "no disponible"
+            "not available"
             if particle.width is None
             else f"{particle.width:.8e}"
         )
@@ -352,7 +352,7 @@ def resolve_candidate(
         for particle in read_particles:
             if particle.pdg == requested_pdg:
                 return particle
-        raise ValueError(f"No existe el PDG {requested_pdg} en Block MASS.")
+        raise ValueError(f"PDG code {requested_pdg} was not found in Block MASS.")
 
     normalized_query = normalize_name(query)
     matches: list[Particle] = []
@@ -372,13 +372,13 @@ def resolve_candidate(
 
     if not matches:
         raise ValueError(
-            f"No pude identificar '{query}'. "
-            "Use el nombre del param_card, un alias de carpeta o el PDG."
+            f"Could not identify '{query}'. "
+            "Use a particle name from the parameter card, a folder alias, or a PDG code."
         )
 
     if len(matches) > 1:
         options = ", ".join(f"{p.name} (PDG {p.pdg})" for p in matches)
-        raise ValueError(f"Nombre ambiguo. Coincidencias: {options}")
+        raise ValueError(f"Ambiguous particle name. Matches: {options}")
 
     return matches[0]
 
@@ -397,7 +397,7 @@ def get_dark_particles(
         missing = sorted(requested_dark_pdgs - particles_by_pdg.keys())
         if missing:
             raise ValueError(
-                "Los siguientes PDG oscuros no existen en el param_card: "
+                "The following dark-sector PDG codes are missing from the parameter card: "
                 + ", ".join(map(str, missing))
             )
         dark_pdgs = requested_dark_pdgs
@@ -434,33 +434,33 @@ def validate_candidate(
 
     if candidate.mass <= 0.0 or not math.isfinite(candidate.mass):
         raise ValueError(
-            f"El candidato {candidate.name} tiene una masa inválida: "
+            f"Candidate {candidate.name} has an invalid mass: "
             f"{candidate.mass}"
         )
 
     if candidate.pdg not in SCOTOGENIC_FOLDER_ALIASES:
         raise ValueError(
-            f"No hay alias de SubProcesses configurado para "
+            f"No SubProcesses alias is configured for "
             f"{candidate.name} (PDG {candidate.pdg})."
         )
 
     if candidate.width is None:
         warnings.append(
-            "El ancho de decaimiento del candidato no aparece en el param_card; "
-            "no se pudo validar su estabilidad."
+            "The candidate's decay width is missing from the parameter card; "
+            "its stability could not be verified."
         )
     elif abs(candidate.width) > width_tolerance:
         message = (
-            f"El candidato {candidate.name} tiene ancho no nulo: "
+            f"Candidate {candidate.name} has a nonzero decay width: "
             f"Gamma={candidate.width:.8e} GeV. "
-            "Una partícula de materia oscura debe ser estable."
+            "A dark matter candidate must be stable."
         )
         if allow_unstable:
             warnings.append(message)
         else:
             raise ValueError(
                 message
-                + " Use --allow-unstable-candidate solo para una prueba consciente."
+                + " Use --allow-unstable-candidate only for an intentional test."
             )
 
     lighter = [
@@ -477,7 +477,7 @@ def validate_candidate(
             for particle in lighter
         )
         message = (
-            f"Existen partículas del sector oscuro más ligeras que "
+            f"There are dark-sector particles lighter than "
             f"{candidate.name}: {details}."
         )
         if allow_nonlightest:
@@ -485,7 +485,7 @@ def validate_candidate(
         else:
             raise ValueError(
                 message
-                + " Use --allow-nonlightest-candidate solo para una prueba consciente."
+                + " Use --allow-nonlightest-candidate only for an intentional test."
             )
 
     return warnings
@@ -549,21 +549,21 @@ def print_dark_sector_table(
     max_delta: float,
     min_relative_weight: float,
 ) -> None:
-    print("\nPreselección térmica del sector oscuro")
+    print("\nDark-Sector Thermal Preselection")
     print(
         f"x_ref={x_ref:g}, max_delta={max_delta:g}, "
         f"min_relative_weight={min_relative_weight:g}"
     )
     print("-" * 116)
     print(
-        f"{'PDG':>8}  {'nombre':<10} {'masa [GeV]':>16} "
-        f"{'Delta':>13} {'peso eq. relativo':>19} "
-        f"{'preselect.':>10}  motivo"
+        f"{'PDG':>8}  {'name':<10} {'mass [GeV]':>16} "
+        f"{'Delta':>13} {'relative eq. weight':>19} "
+        f"{'preselected.':>10}  reason"
     )
     print("-" * 116)
 
     for decision in decisions:
-        active_text = "sí" if decision.included else "no"
+        active_text = "yes" if decision.included else "no"
         print(
             f"{decision.pdg:>8d}  "
             f"{decision.name:<10} "
@@ -590,7 +590,7 @@ def build_alias_lookup(
         aliases = SCOTOGENIC_FOLDER_ALIASES.get(particle.pdg, ())
         for alias in aliases:
             if alias in alias_to_pdg and alias_to_pdg[alias] != particle.pdg:
-                raise ValueError(f"Alias duplicado en configuración: {alias}")
+                raise ValueError(f"Duplicate alias in configuration: {alias}")
             alias_to_pdg[alias] = particle.pdg
 
     # Longest first prevents etp from interfering with etpc.
@@ -719,7 +719,7 @@ def scan_processes(
         elif mode in {"effective_dark_sector", "combined"}:
             selected = active_pair
         else:
-            raise ValueError(f"Modo desconocido: {mode}")
+            raise ValueError(f"Unknown selection mode: {mode}")
 
         records.append(
             ProcessRecord(
@@ -749,13 +749,13 @@ def print_selection_summary(
     for record in selected:
         categories[record.category] = categories.get(record.category, 0) + 1
 
-    print("\nResumen de selección")
+    print("\nSelection Summary")
     print("-" * 72)
-    print(f"Modo                         : {mode}")
-    print(f"Directorios analizados       : {len(records) + len(unparsed)}")
-    print(f"Directorios interpretados    : {len(records)}")
-    print(f"Directorios no interpretados : {len(unparsed)}")
-    print(f"Directorios seleccionados    : {len(selected)}")
+    print(f"Mode                         : {mode}")
+    print(f"Directories scanned       : {len(records) + len(unparsed)}")
+    print(f"Directories parsed    : {len(records)}")
+    print(f"Unparsed directories : {len(unparsed)}")
+    print(f"Selected directories    : {len(selected)}")
 
     for category in (
         "candidate_only",
@@ -770,7 +770,7 @@ def print_selection_summary(
 def print_selected_processes(records: list[ProcessRecord]) -> None:
     selected = [record for record in records if record.selected]
 
-    print("\nProcesos seleccionados:")
+    print("\nSelected Processes:")
     print("-" * 120)
 
     for index, record in enumerate(selected, start=1):
@@ -841,14 +841,14 @@ def copy_selected_processes(
     selected = [record for record in records if record.selected]
 
     if not selected:
-        raise ValueError("No hay procesos seleccionados para copiar.")
+        raise ValueError("No processes were selected for copying.")
 
     source_resolved = subprocesses_dir.resolve()
     output_resolved = output_dir.resolve()
 
     if source_resolved == output_resolved:
         raise ValueError(
-            "La carpeta de salida no puede ser la misma que SubProcesses."
+            "The output directory cannot be the same as SubProcesses."
         )
 
     temporary_dir = output_dir.with_name(output_dir.name + ".__tmp__")
@@ -890,7 +890,7 @@ def copy_selected_processes(
     except Exception:
         print()
         print(
-            f"Falló la copia. La fuente {subprocesses_dir} no fue modificada.",
+            f"Copy operation failed. Source directory {subprocesses_dir} was not modified.",
             file=sys.stderr,
         )
         raise
@@ -941,7 +941,7 @@ def parse_bool(value: object, field_name: str = "value") -> bool:
         return False
 
     raise ValueError(
-        f"Valor booleano inválido para {field_name}: {value!r}. "
+        f"Invalid Boolean value for {field_name}: {value!r}. "
         "Use yes/no, true/false, 1/0 o si/no."
     )
 
@@ -964,7 +964,7 @@ def parse_pdg_tokens(value: object) -> list[int]:
         try:
             pdgs.append(int(token))
         except ValueError as exc:
-            raise ValueError(f"PDG inválido en la entrada: {token!r}") from exc
+            raise ValueError(f"Invalid PDG code in input: {token!r}") from exc
 
     return pdgs
 
@@ -993,7 +993,7 @@ def load_input_file(path: Path) -> dict[str, object]:
     CLI arguments override values from this file.
     """
     if not path.is_file():
-        raise FileNotFoundError(f"No existe el archivo de entrada: {path}")
+        raise FileNotFoundError(f"Input file does not exist: {path}")
 
     config: dict[str, object] = {}
     bare_pdgs: list[int] = []
@@ -1043,8 +1043,8 @@ def load_input_file(path: Path) -> dict[str, object]:
                 bare_pdgs.extend(parse_pdg_tokens(stripped))
             except ValueError as exc:
                 raise ValueError(
-                    f"Línea {line_number} de {path} no reconocida: {stripped!r}. "
-                    "Use key=value o una lista de PDGs."
+                    f"Unrecognized line {line_number} in {path}: {stripped!r}. "
+                    "Use key=value or a list of PDG codes."
                 ) from exc
 
     if bare_pdgs:
@@ -1148,14 +1148,14 @@ def _choose_interactively(title: str, paths: list[Path]) -> Path:
     for index, path in enumerate(paths, start=1):
         print(f"  {index}. {path}")
     while True:
-        answer = input("Seleccione una opción por número: ").strip()
+        answer = input("Select an option by number: ").strip()
         try:
             selected = int(answer)
         except ValueError:
             selected = 0
         if 1 <= selected <= len(paths):
             return paths[selected - 1]
-        print("Opción inválida.")
+        print("Invalid option.")
 
 
 def discover_runtime_layout(
@@ -1176,17 +1176,17 @@ def discover_runtime_layout(
         if len(matches) == 0:
             expected = ", ".join(MODEL_DIR_PATTERNS.get(str(model_value), (str(model_value),)))
             raise FileNotFoundError(
-                f"No pude localizar el modelo {model_value!r}. "
-                f"Busqué directorios tipo: {expected} bajo {project_root} y {project_root.parent}. "
-                "También puede pasar la ruta del modelo directamente con --model /ruta/al/modelo."
+                f"Could not locate model {model_value!r}. "
+                f"Searched for directories matching: {expected} under {project_root} and {project_root.parent}. "
+                "You may also provide the model's directory directly using --model /path/to/model."
             )
         if len(matches) > 1:
             if not sys.stdin.isatty():
                 raise ValueError(
-                    "Se encontraron varios roots compatibles para --model; use una ruta explícita. "
+                    "Multiple compatible model roots were found for --model; provide an explicit path. "
                     + "; ".join(str(path) for path in matches)
                 )
-            model_root = _choose_interactively("Se encontraron varios roots para el modelo:", matches)
+            model_root = _choose_interactively("Multiple model roots were found:", matches)
         else:
             model_root = matches[0]
         model_label = str(model_value)
@@ -1206,11 +1206,11 @@ def discover_runtime_layout(
             elif len(discovered) > 1:
                 if not sys.stdin.isatty():
                     raise ValueError(
-                        "Hay varios modelos disponibles. Use --model 1 / --model 2 "
-                        "para fijar explícitamente el modelo y evitar mezclar param_cards."
+                        "Multiple models are available. Use --model 1 or --model 2 "
+                        "to explicitly select a model and prevent parameter cards from different models from being mixed."
                     )
                 model_root = _choose_interactively(
-                    "UI2 detectó varios modelos; elija uno para mantener card/SubProcesses ligados:",
+                    "UI2 detected multiple models. Select one to keep the parameter card and SubProcesses linked to the same model:",
                     discovered,
                 )
                 model_label = model_root.name
@@ -1267,40 +1267,40 @@ def resolve_ui2_param_card(
     if requested is None:
         if cards_dir is None or not cards_dir.is_dir():
             raise ValueError(
-                "UI2 no encontró un directorio de param_cards en el modelo seleccionado. "
-                "Use un nombre/ruta de param_card o el override avanzado --cards-dir."
+                "UI2 could not find a parameter-card directory in the selected model. "
+                "Provide a parameter-card name or path, or use the advanced --cards-dir option."
             )
         cards = list_param_cards(cards_dir)
         if not cards:
-            raise FileNotFoundError(f"No encontré param_cards .dat dentro de {cards_dir}")
+            raise FileNotFoundError(f"No .dat parameter cards were found in {cards_dir}")
         if len(cards) == 1:
             card = cards[0]
         elif sys.stdin.isatty():
             card = _choose_interactively(
-                f"Se encontraron {len(cards)} param_cards en {cards_dir}:",
+                f"Found {len(cards)} parameter cards in {cards_dir}:",
                 cards,
             )
         else:
             raise ValueError(
-                "Hay varios param_cards posibles. Indique uno por nombre o ruta para una ejecución no interactiva."
+                "Multiple parameter cards are available. Specify a name or path for non-interactive execution."
             )
     else:
         card = resolve_param_card_path(requested, cards_dir=cards_dir, config_dir=config_dir)
 
     if layout.strict_model_binding and not _is_within(card, layout.model_root):
         raise ValueError(
-            "MODEL_PARAM_CARD_MISMATCH: el param_card seleccionado no pertenece al mismo "
-            f"modelo que SubProcesses. Modelo={layout.model_root}; card={card}. "
-            "Esto bloquea explícitamente usar una card del modelo 1 con el modelo 2 (o viceversa)."
+            "MODEL_PARAM_CARD_MISMATCH: The selected parameter card does not belong "
+            f"to the same model as SubProcesses. Model={layout.model_root}; card={card}. "
+            "Mixing parameter cards from different models is explicitly prohibited."
         )
 
     return card.resolve()
 
 
 def print_runtime_layout(layout: RuntimeLayout, param_card: Path, build_dir: Path) -> None:
-    print("\nLayout resuelto por UI2")
+    print("\nResolved UI2 Layout")
     print("-" * 88)
-    print(f"Modelo             : {layout.model_label}")
+    print(f"Model            : {layout.model_label}")
     print(f"Model root         : {layout.model_root}")
     print(f"param_card         : {param_card}")
     print(f"SubProcesses       : {layout.subprocesses_dir}")
@@ -1315,28 +1315,30 @@ def print_combined_selection_criteria(
     max_delta: float,
     min_relative_weight: float,
 ) -> None:
-    print("\nCriterios de preselección de coaniquiladores (modo combined)")
+    print("\nCoannihilator Preselection Criteria (combined mode)")
     print("-" * 100)
     print(
-        f"1) Cercanía de masa: Delta_i=(m_i-m_DM)/m_DM <= {max_delta:g}. "
-        "Esto elimina estados demasiado separados en masa."
+        f"1) Mass proximity: Delta_i=(m_i-m_DM)/m_DM <= {max_delta:g}. "
+        "This excludes states with excessively large mass splittings."
     )
     print(
-        "2) Supresión térmica / abundancia de equilibrio: "
+        "2) Thermal suppression / equilibrium abundance: "
         "n_i^eq/n_DM^eq = (g_i/g_DM)(1+Delta_i)^(3/2) exp[-x_f Delta_i]."
     )
     print(
-        f"   UI2 usa x_f={xf:g} y exige n_i^eq/n_DM^eq >= {min_relative_weight:g}. "
-        "x_f=m_DM/T: a mayor x_f, mayor supresión de Boltzmann para el mismo Delta_i."
+        f"   UI2 uses x_f={xf:g} and requires "
+        f"n_i^eq/n_DM^eq >= {min_relative_weight:g}. "
+        "Since x_f=m_DM/T, a larger x_f implies stronger Boltzmann "
+        "suppression for the same mass splitting."  
     )
     print(
-        "3) Relevancia dinámica: requiere sigma-v. Este UI2 NO usa sigma-v como gate automático "
-        "de selección; --task sigmav lo calcula DESPUÉS de esta preselección térmica."
+        "3) Dynamical relevance: requires sigma-v information. "
+        "UI2 does NOT currently use sigma-v as an automatic selection criterion; --task sigmav calculates it AFTER thermal preselection. "
     )
     print(
-        "   Por tanto, 'incluido' aquí significa candidato térmicamente plausible, no una "
-        "coaniquilación final demostrada. Para podar por sigma-v hace falta definir y validar "
-        "un parser/umbral de contribución por proceso."
+        "   Therefore, 'included' means thermally plausible, not a dynamically significant coannihilation channel. "
+        "A validated per-process contribution calculation and threshold "
+        "are required for sigma-v-based pruning."
     )
     print("-" * 100)
 
@@ -1355,25 +1357,25 @@ def particle_by_pdg(read_particles: list[Particle], pdg: int) -> Particle:
     for particle in read_particles:
         if particle.pdg == pdg:
             return particle
-    raise ValueError(f"El PDG {pdg} no existe en Block MASS del param_card.")
+    raise ValueError(f"PDG code {pdg} was not found in Block MASS of the parameter card.")
 
 
 def print_candidate_summary(candidate: Particle) -> None:
-    print("\nCandidato identificado")
+    print("\nIdentified Dark Matter Candidate")
     print("-" * 72)
-    print(f"Nombre          : {candidate.name}")
+    print(f"Name          : {candidate.name}")
     print(f"PDG             : {candidate.pdg}")
-    print(f"Masa            : {candidate.mass:.8e} GeV")
+    print(f"Mass            : {candidate.mass:.8e} GeV")
     print(
-        "Ancho           : "
+        "Decay width           : "
         + (
-            "no disponible"
+            "not available"
             if candidate.width is None
             else f"{candidate.width:.8e} GeV"
         )
     )
     print(
-        "Alias de carpeta: "
+        "Folder aliases: "
         + ", ".join(SCOTOGENIC_FOLDER_ALIASES[candidate.pdg])
     )
     print("-" * 72)
@@ -1401,7 +1403,7 @@ def scan_processes_pdg(
     process inventory rather than guessing from names alone.
     """
     if not requested_pdgs:
-        raise ValueError("El modo PDG necesita al menos el PDG del candidato.")
+        raise ValueError("PDG mode requires at least the candidate's PDG code.")
 
     candidate_pdg = requested_pdgs[0]
     partner_pdgs = [pdg for pdg in unique_pdgs(requested_pdgs[1:]) if pdg != candidate_pdg]
@@ -1412,8 +1414,8 @@ def scan_processes_pdg(
         particle = particle_by_pdg(dark_particles, pdg)
         if pdg not in SCOTOGENIC_FOLDER_ALIASES:
             raise ValueError(
-                f"{pdg} ({particle.name}) existe en el param_card, pero no tiene "
-                "alias de estado inicial configurado para SubProcesses."
+                f"{pdg} ({particle.name}) exists in the parameter card but has no configured initial-state "
+                "alias for SubProcesses."
             )
 
     alias_to_pdg, sorted_aliases = build_alias_lookup(dark_particles)
@@ -1456,7 +1458,7 @@ def scan_processes_pdg(
 
     if candidate_candidate_count == 0:
         warnings.append(
-            f"No existe ningún canal {candidate_pdg}+{candidate_pdg} en SubProcesses."
+            f"No {candidate_pdg}+{candidate_pdg} channel exists in SubProcesses."
         )
 
     decisions: list[ManualPDGDecision] = []
@@ -1475,9 +1477,9 @@ def scan_processes_pdg(
         else:
             reason = "no candidate-partner process exists in SubProcesses"
             warnings.append(
-                f"{candidate.pdg} ({candidate.name}) no puede interactuar con "
-                f"{pdg} ({partner.name}) dentro del inventario actual de "
-                "SubProcesses: no existe ningún canal generado para ese estado inicial."
+                f"{candidate.pdg} ({candidate.name}) can not interact with "
+                f"{pdg} ({partner.name}) in the current SubProcesses inventory "
+                "SubProcesses: No generated initial-state channel was found for this initial process."
             )
 
         decisions.append(
@@ -1536,26 +1538,26 @@ def print_manual_pdg_table(
     requested_pdgs: list[int],
     decisions: list[ManualPDGDecision],
 ) -> None:
-    print("\nValidación del modo PDG")
+    print("\nPDG Mode Validation")
     print("-" * 118)
     print(
-        "Regla: el primer PDG es el candidato; se incluyen todas sus "
-        "aniquilaciones y solo las coaniquilaciones candidato+PDG solicitadas."
+        "Rule: the first PDG identifies the dark matter candidate. All candidate-candidate annihilation channels are included, "
+        "along with the requested candidate-partner coannihilation channels."
     )
-    print(f"Entrada PDG: {' '.join(map(str, requested_pdgs))}")
-    print(f"Candidato : {candidate.pdg} ({candidate.name})")
+    print(f"Input PDGs: {' '.join(map(str, requested_pdgs))}")
+    print(f"Candidate: {candidate.pdg} ({candidate.name})")
     print("-" * 118)
     print(
-        f"{'PDG':>8}  {'nombre':<10} {'masa [GeV]':>16} "
-        f"{'Delta':>13} {'canales':>10} {'válido':>8}  motivo"
+        f"{'PDG':>8}  {'name':<10} {'mass [GeV]':>16} "
+        f"{'Delta':>13} {'channels':>10} {'valid':>8}  reason"
     )
     print("-" * 118)
 
     if not decisions:
-        print("No se solicitaron coaniquiladores adicionales; solo se usarán las aniquilaciones del candidato.")
+        print("No additional coannihilators were requested; only candidate-candidate annihilation channels will be included.")
     else:
         for decision in decisions:
-            valid_text = "sí" if decision.included else "no"
+            valid_text = "yes" if decision.included else "no"
             print(
                 f"{decision.pdg:>8d}  "
                 f"{decision.name:<10} "
@@ -1639,12 +1641,12 @@ def copy_selected_processes_v2(
     """
     selected = [record for record in records if record.selected]
     if not selected:
-        raise ValueError("No hay procesos seleccionados para copiar.")
+        raise ValueError("No processes were selected for copying.")
 
     source_resolved = subprocesses_dir.resolve()
     output_resolved = output_dir.resolve()
     if source_resolved == output_resolved:
-        raise ValueError("La carpeta de salida no puede ser la misma que SubProcesses.")
+        raise ValueError("The output directory cannot be the same as SubProcesses.")
 
     temporary_dir = output_dir.with_name(output_dir.name + ".__tmp__")
     if temporary_dir.exists():
@@ -1698,7 +1700,7 @@ def copy_selected_processes_v2(
         if temporary_dir.exists():
             shutil.rmtree(temporary_dir, ignore_errors=True)
         print(
-            f"Falló la copia. La fuente {subprocesses_dir} no fue modificada.",
+            f"Copy operation failed. Source directory {subprocesses_dir} was not modified.",
             file=sys.stderr,
         )
         raise
@@ -1707,7 +1709,7 @@ def copy_selected_processes_v2(
 def bash_regex_for_selected_processes(records: list[ProcessRecord]) -> str:
     names = sorted(record.directory for record in records if record.selected)
     if not names:
-        raise ValueError("No hay procesos seleccionados para construir el selector.")
+        raise ValueError("No processes were selected to construct the subprocess filter.")
 
     # Directory names are mostly alphanumeric/underscore, but re.escape keeps
     # this safe if a future generated process contains regex metacharacters.
@@ -1727,7 +1729,7 @@ def resolve_param_card_path(
         candidate = raw.resolve()
         if candidate.is_file():
             return candidate
-        raise FileNotFoundError(f"No existe el param_card: {candidate}")
+        raise FileNotFoundError(f"Parameter card does not exist: {candidate}")
 
     candidates: list[Path] = []
 
@@ -1753,7 +1755,7 @@ def resolve_param_card_path(
 
     tried = "\n  - ".join(str(path.resolve()) for path in candidates)
     raise FileNotFoundError(
-        f"No pude localizar el param_card '{raw}'. Rutas probadas:\n  - {tried}"
+        f"Could not locate parameter card '{raw}'. Paths checked:\n  - {tried}"
     )
 
 
@@ -1849,13 +1851,13 @@ def resolve_cmake_kerrigan(
         )
         return candidate, detected_build.resolve()
 
-    tried = "\n  - ".join(str(path) for path in checked) or "(ninguna ruta candidata)"
+    tried = "\n  - ".join(str(path) for path in checked) or "(no candidate paths)"
     raise FileNotFoundError(
-        "No encontré un Kerrigan.sh generado por CMake. El selector ya no ejecuta "
-        "Kerrigan.sh.in ni mind_master.sh directamente.\n"
-        "Ejecute CMake y/o indique --build-dir /ruta/al/build o --kerrigan "
-        "/ruta/al/build/scripts/Kerrigan.sh.\n"
-        f"Rutas probadas:\n  - {tried}"
+        "Could not find a Kerrigan.sh script generated by CMake. "
+        "The selector no longer executes Kerrigan.sh.in or mind_master.sh directly.\n"
+        "Run CMake and/or provide --build-dir /path/to/build or --kerrigan "
+        "/path/to/build/scripts/Kerrigan.sh.\n"
+        f"Paths checked:\n  - {tried}"
     )
 
 
@@ -1863,7 +1865,7 @@ def infer_mg5_output(subprocesses_dir: Path, explicit_value: Optional[object]) -
     if explicit_value is not None:
         path = Path(str(explicit_value)).expanduser().resolve()
         if not path.is_dir():
-            raise FileNotFoundError(f"No existe el MG5 output: {path}")
+            raise FileNotFoundError(f"MG5 output directory does not exist: {path}")
         return path
 
     # A normal MadGraph output has .../<output>/SubProcesses and .../<output>/src.
@@ -1890,7 +1892,7 @@ def run_kerrigan(
 ) -> None:
     """Delegate both relic and sigmaV tasks to the CMake-configured Kerrigan."""
     if not kerrigan.is_file():
-        raise FileNotFoundError(f"No existe el Kerrigan generado por CMake: {kerrigan}")
+        raise FileNotFoundError(f"CMake-generated Kerrigan script does not exist: {kerrigan}")
 
     command = [
         "bash",
@@ -1927,28 +1929,28 @@ def run_kerrigan(
     working_dir = (build_dir if build_dir.is_dir() else kerrigan.parent).resolve()
 
     if verbose:
-        print("\nIniciando cálculo con Kerrigan generado por CMake")
+        print("\nStarting calculation using CMake-generated Kerrigan")
         print(f"Kerrigan runtime   : {kerrigan}")
         print(f"CMake build        : {build_dir}")
         print(f"Card               : {param_card}")
         print(f"Task               : {task}")
         if task == "sigmav":
-            print("Pipeline            : sigmaV solamente (sin rama de relic density)")
+            print("Pipeline            : sigmaV only (relic-density branch disabled)")
         else:
             print("Pipeline            : relic density")
         print(
-            f"Procesos filtrados : selector exacto con "
-            f"{selector_regex.count('|') + 1} carpeta(s)"
+            f"Filtered processes : exact selector with "
+            f"{selector_regex.count('|') + 1} directories"
         )
         if mg5_output is not None:
             print(f"MG5 output         : {mg5_output}")
         if physics_output_root is not None:
             print(f"Physics output root: {physics_output_root}")
 
-    print(f"Directorio de trabajo de Kerrigan/run_madgraph: {working_dir}")
+    print(f"Kerrigan/run_madgraph working directory: {working_dir}")
     print(
-        "Nota: cualquier mensaje externo del tipo 'This directory ...' se refiere "
-        "al directorio de trabajo mostrado arriba."
+        "Note: any external message such as 'This directory ...' refers to "
+        "the working directory shown above."
     )
 
     subprocess.run(
@@ -1958,8 +1960,8 @@ def run_kerrigan(
         check=True,
     )
 
-    print("\nCálculo externo completado correctamente.")
-    print(f"Directorio usado por Kerrigan/run_madgraph: {working_dir}")
+    print("\nExternal calculation completed successfully.")
+    print(f"Working directory used by Kerrigan/run_madgraph: {working_dir}")
 
 def build_parser() -> argparse.ArgumentParser:
     script_root = Path(__file__).resolve().parent
@@ -2218,7 +2220,7 @@ def main() -> int:
         mode = str(mode_value).strip().lower()
 
     if mode not in {"combined", "pdg"}:
-        raise ValueError("mode debe ser 'combined' o 'pdg'.")
+        raise ValueError("mode must be 'combined' or 'pdg'.")
 
     xf = float(config_value(args.xf, file_config, "xf", DEFAULT_XF))
     max_delta = float(config_value(args.max_delta, file_config, "max_delta", DEFAULT_MAX_DELTA))
@@ -2240,14 +2242,14 @@ def main() -> int:
     task = task_aliases.get(task, task)
 
     if task not in {"relic", "sigmav"}:
-        raise ValueError("task debe ser 'relic' o 'sigmav'.")
+        raise ValueError("task must be 'relic' or 'sigmav'.")
 
     if xf <= 0.0:
-        raise ValueError("--xf debe ser positivo.")
+        raise ValueError("--xf must be positive.")
     if max_delta < 0.0:
-        raise ValueError("--max-delta no puede ser negativo.")
+        raise ValueError("--max-delta cannot be negative.")
     if min_relative_weight < 0.0:
-        raise ValueError("--min-relative-weight no puede ser negativo.")
+        raise ValueError("--min-relative-weight cannot be negative.")
 
     verbose_value = args.verbose
     if verbose_value is None and "verbose" in file_config:
@@ -2255,7 +2257,7 @@ def main() -> int:
 
     if verbose_value is None:
         if sys.stdin.isatty():
-            verbose = yes_no("¿Desea ver la interfaz detallada?", default=True)
+            verbose = yes_no("Would you like to display the detailed interface?", default=True)
         else:
             verbose = False
     else:
@@ -2283,11 +2285,11 @@ def main() -> int:
         else:
             cards_dir = raw_cards_dir.resolve()
         if not cards_dir.is_dir():
-            raise FileNotFoundError(f"No existe el directorio de param_cards: {cards_dir}")
+            raise FileNotFoundError(f"Parameter-card directory does not exist: {cards_dir}")
         if layout.strict_model_binding and not _is_within(cards_dir, layout.model_root):
             raise ValueError(
-                "MODEL_CARDS_DIR_MISMATCH: --cards-dir apunta fuera del modelo seleccionado. "
-                f"Modelo={layout.model_root}; cards_dir={cards_dir}."
+                "MODEL_CARDS_DIR_MISMATCH: --cards-dir points outside the selected model. "
+                f"Model={layout.model_root}; cards_dir={cards_dir}."
             )
 
     param_card_value: Optional[object] = args.param_card
@@ -2315,8 +2317,8 @@ def main() -> int:
 
     if layout.strict_model_binding and not _is_within(subprocesses_dir, layout.model_root):
         raise ValueError(
-            "MODEL_SUBPROCESSES_MISMATCH: SubProcesses no pertenece al modelo seleccionado. "
-            f"Modelo={layout.model_root}; SubProcesses={subprocesses_dir}."
+            "MODEL_SUBPROCESSES_MISMATCH: SubProcesses does not belong to the selected model. "
+            f"Model={layout.model_root}; SubProcesses={subprocesses_dir}."
         )
 
     build_dir_value = config_value(args.build_dir, file_config, "build_dir", layout.build_dir)
@@ -2344,9 +2346,9 @@ def main() -> int:
     )
 
     if not param_card.is_file():
-        raise FileNotFoundError(f"No existe el param_card: {param_card}")
+        raise FileNotFoundError(f"Parameter card does not exist: {param_card}")
     if not subprocesses_dir.is_dir():
-        raise FileNotFoundError(f"No existe la carpeta SubProcesses: {subprocesses_dir}")
+        raise FileNotFoundError(f"SubProcesses directory does not exist: {subprocesses_dir}")
 
     # Show the binding that prevents card/model cross-contamination before any
     # physics selection is performed.
@@ -2367,16 +2369,16 @@ def main() -> int:
         if not manual_pdgs:
             if not sys.stdin.isatty():
                 raise ValueError(
-                    "Modo PDG sin --pdgs y sin pdgs=... en el archivo de entrada."
+                    "PDG mode requires --pdgs or pdgs=... in the input file."
                 )
             manual_pdgs = parse_pdg_tokens(
                 input(
-                    "Ingrese los PDG (primero candidato; después coaniquiladores): "
+                    "Enter PDG codes (candidate first, followed by coannihilators): "
                 )
             )
 
         if not manual_pdgs:
-            raise ValueError("El modo PDG necesita al menos el PDG del candidato.")
+            raise ValueError("PDG mode requires at least the candidate's PDG code.")
 
         manual_pdgs = unique_pdgs(manual_pdgs)
         candidate = particle_by_pdg(read_particles, manual_pdgs[0])
@@ -2385,8 +2387,8 @@ def main() -> int:
             candidate_from_flag = resolve_candidate(str(candidate_config), read_particles)
             if candidate_from_flag.pdg != candidate.pdg:
                 raise ValueError(
-                    f"--candidate/input candidate={candidate_from_flag.pdg} no coincide "
-                    f"con el primer PDG manual ({candidate.pdg})."
+                    f"--candidate/input candidate={candidate_from_flag.pdg} does not match the first "
+                    f"manually supplied PDG ({candidate.pdg})."
                 )
 
     else:
@@ -2394,9 +2396,9 @@ def main() -> int:
         if candidate_query is None:
             if not sys.stdin.isatty():
                 raise ValueError(
-                    "Combined mode necesita --candidate o candidate=... en el input file."
+                    "Combined mode requires --candidate or candidate=... in the input file."
                 )
-            candidate_query = input("\nIngrese el nombre, alias o PDG del candidato: ")
+            candidate_query = input("\nEnter the candidate's name, alias, or PDG code: ")
         candidate = resolve_candidate(str(candidate_query), read_particles)
 
     warnings = validate_candidate(
@@ -2411,7 +2413,7 @@ def main() -> int:
         print_particle_table(read_particles)
         print_candidate_summary(candidate)
         for warning in warnings:
-            print(f"ADVERTENCIA: {warning}")
+            print(f"WARNING: {warning}")
 
     if mode == "combined":
         # ORIGINAL COMBINED LOGIC: unchanged except that xf is now dynamic.
@@ -2473,14 +2475,14 @@ def main() -> int:
         if verbose:
             print_manual_pdg_table(candidate, manual_pdgs, manual_decisions)
             for warning in mode_warnings:
-                print(f"ADVERTENCIA: {warning}")
+                print(f"WARNING: {warning}")
             print_selection_summary(records, unparsed, "pdg")
 
     selected_count = sum(record.selected for record in records)
     if selected_count == 0:
         print(
-            "No se seleccionó ningún proceso. Revise el candidato, los PDG o "
-            "la correspondencia con SubProcesses.",
+            "No processes were selected. Check the candidate, PDG codes, "
+            "and correspondence with SubProcesses.",
             file=sys.stderr,
         )
         return 2
@@ -2491,53 +2493,53 @@ def main() -> int:
     )
     if direct_count == 0:
         message = (
-            "No se encontró ningún canal candidato+candidato en la selección."
+            "No candidate-candidate annihilation channel was found in the selection."
         )
         if verbose:
-            print(f"ADVERTENCIA: {message}")
+            print(f"WARNING: {message}")
 
     if not verbose:
         xf_label = f"{xf:g}" if mode == "combined" else "manual/no-filter"
         print(
-            f"[{mode}] candidato={candidate.name}({candidate.pdg}) | "
-            f"procesos={selected_count} | task={task} | xf={xf_label}"
+            f"[{mode}] candidate={candidate.name}({candidate.pdg}) | "
+            f"processes={selected_count} | task={task} | xf={xf_label}"
         )
         if mode == "combined":
             print(
-                "Nota: la selección combined es una preselección térmica; "
-                "sigma-v todavía no se usa como gate automático de contribución."
+                "Note: combined mode performs thermal preselection only; "
+                "sigma-v is not yet used as an automatic contribution-based selection criterion."
             )
         for warning in warnings:
-            print(f"ADVERTENCIA: {warning}")
+            print(f"WARNING: {warning}")
         for warning in mode_warnings:
-            print(f"ADVERTENCIA: {warning}")
+            print(f"WARNING: {warning}")
 
     if verbose and not args.yes:
         review = yes_no(
-            f"Se seleccionaron {selected_count} procesos. ¿Desea revisar cuáles son?"
+            f"{selected_count} processes were selected. Would you like to review them?"
         )
         if review:
             print_selected_processes(records)
 
     if verbose and unparsed:
         print(
-            f"\nNota: {len(unparsed)} carpetas no pudieron interpretarse. "
-            "Se guardarán en el reporte para revisar aliases."
+            f"Note: {len(unparsed)} subprocess directories could not be parsed. "
+            "They will be recorded in the report for alias verification."
         )
 
     if args.dry_run:
-        print("\nDry run: no se copió, eliminó, respaldó ni ejecutó ningún cálculo.")
+        print("\nDry run: no files were copied, deleted, backed up, or processed.")
         return 0
 
     if verbose and not args.yes:
         proceed = yes_no(
-            f"Se recreará '{output_dir.name}' y se copiarán "
-            f"{selected_count} carpetas desde SubProcesses. ¿Continuar?"
+            f"Directory '{output_dir.name}' will be recreated "
+            f"and {selected_count} subprocess directories will be copied from SubProcesses. Continue?"
         )
         if not proceed:
             print(
-                "Operación cancelada. SubProcesses y la salida existente "
-                "no fueron modificados."
+                "Operation cancelled. SubProcesses and the existing output "
+                "were not modified."
             )
             return 0
 
@@ -2590,17 +2592,17 @@ def main() -> int:
     )
 
     if verbose:
-        print("\nSelección completada")
+        print("\nSelection Completed")
         print("-" * 72)
-        print(f"Fuente sin modificar : {subprocesses_dir}")
-        print(f"Carpeta creada       : {output_dir}")
-        print(f"Procesos copiados    : {selected_count}")
-        print(f"Reporte JSON         : {json_report}")
-        print(f"Reporte CSV          : {csv_report}")
+        print(f"Unmodified source : {subprocesses_dir}")
+        print(f"Created directory       : {output_dir}")
+        print(f"Copied processes    : {selected_count}")
+        print(f"JSON report         : {json_report}")
+        print(f"CSV report          : {csv_report}")
         if backup_destination is not None:
-            print(f"Backup anterior      : {backup_destination}")
+            print(f"Previous backup      : {backup_destination}")
         elif backup:
-            print("Backup anterior      : no había selección previa que respaldar")
+            print("Previous backup      : no previous selection to back up")
         print("-" * 72)
 
     selector_regex = bash_regex_for_selected_processes(records)
@@ -2623,7 +2625,7 @@ def main() -> int:
     )
 
     if not verbose:
-        print("Cálculo iniciado/completado correctamente con la selección filtrada.")
+        print("Calculation completed successfully using the filtered subprocess selection.")
 
     return 0
 
@@ -2633,7 +2635,7 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except subprocess.CalledProcessError as error:
         print(
-            f"ERROR: el proceso externo terminó con código {error.returncode}.",
+            f"ERROR: the external process exited with code {error.returncode}.",
             file=sys.stderr,
         )
         raise SystemExit(error.returncode or 1)
