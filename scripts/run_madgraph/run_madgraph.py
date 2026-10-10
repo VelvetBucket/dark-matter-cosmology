@@ -27,12 +27,14 @@ A) Pipeline mode (recommended)
       - MadGraph from CMakeCache.txt,
       - the UFO from <build>/input/,
       - odd_particles.txt from <build>/input/,
-      - output as <build>/generated/<UFO-name>_standalone.
+       - output as <build>/output/<variant>/<UFO-name>_standalone
+         when a variant is selected.
 
 B) Explicit mode (backward compatible)
    Provide --mg5-root, --ufo, --odd/--odd-file and --output manually.
 
-The MadGraph installation and source UFO are never modified.
+The source UFO is not modified. This script currently sets auto_update = 0
+in the MadGraph installation configuration before running MG5.
 """
 
 from __future__ import annotations
@@ -1028,7 +1030,8 @@ def write_pipeline_pointer(
 ) -> Tuple[Path, Path]:
     """
     Keep a tiny machine-readable pointer to the latest generated MG5 root.
-    Existing UI/Kerrigan do not require this file, so this is non-breaking.
+    UI2 and Kerrigan use this pointer to resolve the generated model safely.
+    The manifest retains the authoritative variant / build provenance.
     """
     generated_root = (
         build_dir / "generated"
@@ -1068,6 +1071,10 @@ def write_pipeline_pointer(
                 "generation_manifest": str(
                     manifest_path.resolve()
                 ),
+                "cmake_build_dir": str(build_dir.resolve()),
+                "variant": json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                ).get("variant"),
             },
             indent=2,
             sort_keys=True,
@@ -1100,8 +1107,8 @@ def parse_args() -> argparse.Namespace:
         "--build-dir",
         type=Path,
         help=(
-            "Configured CMake build directory. In pipeline mode this "
-            "defaults to $BUILD_DIR (set by initiate_model.sh)."
+            "Configured CMake build directory. Defaults to $BUILD_DIR or "
+            "auto-detected build/ near this script / current directory."
         ),
     )
 
@@ -1274,6 +1281,22 @@ def resolve_runtime_inputs(
         build_dir = args.build_dir.expanduser().resolve()
     else:
         build_dir = _env_path("BUILD_DIR")
+        if build_dir is None:
+            # CMake remains authoritative. Find its configured build tree,
+            # whether the caller runs the source copy or the CMake copy.
+            script = Path(__file__).resolve()
+            cwd = Path.cwd().resolve()
+            candidates = (
+                script.parents[2],           # <build>/scripts/run_madgraph or repo root
+                script.parents[2] / "build", # source-tree invocation
+                cwd,
+                cwd / "build",
+                cwd.parent / "build",
+            )
+            for possible in candidates:
+                if (possible / "CMakeCache.txt").is_file():
+                    build_dir = possible.resolve()
+                    break
 
     if build_dir is not None:
         if not build_dir.is_dir():
@@ -1310,6 +1333,28 @@ def resolve_runtime_inputs(
         input_dir = _env_path("INPUT_DIR")
         if input_dir is None and build_dir is not None:
             input_dir = (build_dir / "input").resolve()
+
+    # With no --variant or $VARIANT, infer only when there is exactly one
+    # available model with a valid UFO and odd_particles file. Never guess
+    # between multiple model variants.
+    if not variant and input_dir is not None and input_dir.is_dir():
+        available = [
+            child for child in sorted(input_dir.iterdir())
+            if child.is_dir()
+            and discover_odd_file(child) is not None
+            and (looks_like_ufo(child) or any(
+                looks_like_ufo(grandchild) for grandchild in child.iterdir()
+                if grandchild.is_dir()
+            ))
+        ]
+        if len(available) == 1:
+            variant = available[0].name
+        elif len(available) > 1:
+            die(
+                "Multiple model variants are available: "
+                + ", ".join(item.name for item in available)
+                + ". Specify --variant NAME."
+            )
 
     # ------------------------------------------------------------------
     # Variant root: <input>/<variant> if variant is set, else <input>
@@ -1494,7 +1539,7 @@ def main() -> int:
         odd_names,
     )
 
-    if output_dir.exists():
+    if output_dir.exists() and not args.dry_run:
         if not args.force:
             die(
                 f"Output already exists: {output_dir}. "

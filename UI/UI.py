@@ -167,6 +167,9 @@ class RuntimeLayout:
     backup_root: Path
     build_dir: Optional[Path]
     strict_model_binding: bool
+    # The CMake layout stores inputs and generated standalone code in
+    # different model-specific directories.
+    mg5_output: Optional[Path] = None
 
 
 # ---------------------------------------------------------------------------
@@ -866,7 +869,7 @@ def copy_selected_processes(
             destination = temporary_dir / record.directory
 
             print(
-                f"\rCopiando {index}/{total}: {record.directory}",
+                f"\rCopying {index}/{total}: {record.directory}",
                 end="",
                 flush=True,
             )
@@ -1158,12 +1161,181 @@ def _choose_interactively(title: str, paths: list[Path]) -> Path:
         print("Invalid option.")
 
 
+
+
+def find_cmake_build_dir(
+    script_root: Path,
+    project_root_value: Optional[object],
+    explicit_build_dir: Optional[object],
+) -> Optional[Path]:
+    """Discover the CMake build tree, never inventing alternate build paths."""
+    if explicit_build_dir is not None:
+        selected = Path(str(explicit_build_dir)).expanduser().resolve()
+        if not (selected / "CMakeCache.txt").is_file():
+            raise FileNotFoundError(
+                f"--build-dir must contain CMakeCache.txt: {selected}"
+            )
+        return selected
+
+    project = (
+        Path(str(project_root_value)).expanduser().resolve()
+        if project_root_value is not None else script_root.resolve().parent
+    )
+    cwd = Path.cwd().resolve()
+    candidates = [
+        os.environ.get("BUILD_DIR"),
+        os.environ.get("SCOTOGENIC_BUILD_DIR"),
+        script_root.parent,
+        script_root.parent / "build",
+        project,
+        project / "build",
+        cwd,
+        cwd / "build",
+    ]
+    checked = set()
+    for value in candidates:
+        if not value:
+            continue
+        candidate = Path(str(value)).expanduser().resolve()
+        if candidate in checked:
+            continue
+        checked.add(candidate)
+        if (candidate / "CMakeCache.txt").is_file():
+            return candidate
+    return None
+
+
+def discover_cmake_model_layout(
+    build_dir: Path,
+    model_value: Optional[object],
+    explicit_mg5_output: Optional[object],
+) -> Optional[RuntimeLayout]:
+    """Use CMake's <build>/input and MadGraph's generation manifest/pointer.
+
+    An explicit --model selects a variant, overriding the last-model pointer;
+    an explicit --mg5-output can select a different standalone for that variant.
+    Nothing is inferred from the MG5 *installation* directory.
+    """
+    input_dir = (build_dir / "input").resolve()
+    output_root = (build_dir / "output").resolve()
+    pointer = build_dir / "generated" / "current_mg5_output.json"
+    requested_variant = None if model_value is None else str(model_value).strip()
+    if requested_variant:
+        # Absolute model directories from the legacy layout remain handled by
+        # discover_runtime_layout. Only plain variant names enter this path.
+        raw = Path(requested_variant).expanduser()
+        if raw.is_absolute() or len(raw.parts) > 1:
+            if raw.resolve().parent == input_dir:
+                requested_variant = raw.name
+            else:
+                return None
+        if not (input_dir / requested_variant).is_dir():
+            return None
+
+    if explicit_mg5_output is not None:
+        output = Path(str(explicit_mg5_output)).expanduser().resolve()
+    elif requested_variant:
+        base = output_root / requested_variant
+        available = sorted(
+            child.resolve() for child in base.iterdir()
+            if child.is_dir() and (child / "SubProcesses").is_dir()
+            and (child / "src").is_dir()
+        ) if base.is_dir() else []
+        if len(available) != 1:
+            raise ValueError(
+                f"Expected exactly one MG5 standalone output for model "
+                f"{requested_variant!r} in {base}; found {len(available)}. "
+                "Use --mg5-output /absolute/path/to/standalone to disambiguate."
+            )
+        output = available[0]
+    elif pointer.is_file():
+        try:
+            info = json.loads(pointer.read_text(encoding="utf-8"))
+            output = Path(info["mg5_output"]).expanduser().resolve()
+            pointed_subprocesses = Path(info["subprocesses"]).expanduser().resolve()
+            if pointed_subprocesses != (output / "SubProcesses").resolve():
+                raise ValueError("pointer SubProcesses does not match its model output")
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError(f"Invalid MG5 generation pointer {pointer}: {error}") from error
+    else:
+        # Legacy Model1/2 discovery remains available if a CMake model has
+        # not yet been generated; do not infer the first arbitrary model.
+        if not requested_variant and explicit_mg5_output is None:
+            return None
+        raise FileNotFoundError(
+            "No MG5 output found. Generate the model first with "
+            "run_madgraph.py or specify --mg5-output."
+        )
+
+    if not (output / "SubProcesses").is_dir() or not (output / "src").is_dir():
+        raise FileNotFoundError(
+            f"MG5 output is missing SubProcesses/ or src/: {output}"
+        )
+    manifest_file = output / "generation_manifest.json"
+    if not manifest_file.is_file():
+        raise FileNotFoundError(
+            f"MG5 generation manifest is missing: {manifest_file}. "
+            "Automated CMake model binding requires a manifest; use the legacy "
+            "manual layout for older packages."
+        )
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        variant = manifest.get("variant")
+        manifest_build = manifest.get("cmake_build_dir")
+        manifest_output = manifest.get("output")
+        if not isinstance(variant, str) or not variant:
+            raise ValueError("manifest does not identify a model variant")
+        if manifest_build and Path(manifest_build).resolve() != build_dir.resolve():
+            raise ValueError("manifest belongs to a different CMake build")
+        if manifest_output and Path(manifest_output).resolve() != output:
+            raise ValueError("manifest output path does not match selected output")
+        if requested_variant and requested_variant != variant:
+            raise ValueError(
+                f"--model {requested_variant!r} conflicts with MG5 output "
+                f"variant {variant!r}"
+            )
+        variant_dir = (input_dir / variant).resolve()
+        if not variant_dir.is_dir():
+            raise FileNotFoundError(f"Model input directory does not exist: {variant_dir}")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f"Invalid generation manifest {manifest_file}: {error}") from error
+
+    cards_dir = _first_existing_dir(variant_dir, PARAM_CARD_DIR_NAMES)
+    return RuntimeLayout(
+        model_label=variant,
+        model_root=variant_dir,
+        cards_dir=cards_dir,
+        subprocesses_dir=(output / "SubProcesses").resolve(),
+        output_dir=(output / "effective_SubProcesses").resolve(),
+        backup_root=(output / "back_up").resolve(),
+        build_dir=build_dir,
+        strict_model_binding=True,
+        mg5_output=output,
+    )
+
+
 def discover_runtime_layout(
     script_root: Path,
     model_value: Optional[object],
     project_root_value: Optional[object],
+    build_dir_hint: Optional[object] = None,
+    mg5_output_hint: Optional[object] = None,
 ) -> RuntimeLayout:
-    """Resolve the normal UI2 layout once, instead of asking for every path."""
+    """Resolve CMake's model layout first, keeping the legacy UI layout as fallback."""
+    cmake_build = find_cmake_build_dir(
+        script_root=script_root,
+        project_root_value=project_root_value,
+        explicit_build_dir=build_dir_hint,
+    )
+    if cmake_build is not None:
+        cmake_layout = discover_cmake_model_layout(
+            build_dir=cmake_build,
+            model_value=model_value,
+            explicit_mg5_output=mg5_output_hint,
+        )
+        if cmake_layout is not None:
+            return cmake_layout
+
     project_root = (
         Path(str(project_root_value)).expanduser().resolve()
         if project_root_value is not None
@@ -1288,10 +1460,19 @@ def resolve_ui2_param_card(
         card = resolve_param_card_path(requested, cards_dir=cards_dir, config_dir=config_dir)
 
     if layout.strict_model_binding and not _is_within(card, layout.model_root):
-        raise ValueError(
-            "MODEL_PARAM_CARD_MISMATCH: The selected parameter card does not belong "
-            f"to the same model as SubProcesses. Model={layout.model_root}; card={card}. "
-            "Mixing parameter cards from different models is explicitly prohibited."
+        # Explicit external cards support scans; never accept a card from a
+        # different configured CMake model variant.
+        build_dir = layout.build_dir
+        known_variants = (build_dir / "input").resolve() if build_dir else None
+        if (known_variants is not None and _is_within(card, known_variants)) or requested is None:
+            raise ValueError(
+                "MODEL_PARAM_CARD_MISMATCH: The selected parameter card belongs "
+                f"to another model or was inferred outside {layout.model_root}: {card}."
+            )
+        print(
+            f"WARNING: Explicit external parameter card {card} is not inside "
+            f"the selected model {layout.model_root}. Verify its physics consistency.",
+            file=sys.stderr,
         )
 
     return card.resolve()
@@ -1661,7 +1842,7 @@ def copy_selected_processes_v2(
 
             if verbose:
                 print(
-                    f"\rCopiando {index}/{total}: {record.directory}",
+                    f"\rCopying {index}/{total}: {record.directory}",
                     end="",
                     flush=True,
                 )
@@ -1979,9 +2160,8 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         type=Path,
         help=(
-            "Optional parameter-card filename/path. Normally UI2 finds the selected "
-            "model's param_cards directory and auto-selects the only card or asks you "
-            "to choose when several exist."
+            "Optional parameter-card filename/path. Defaults to the only card in "
+            "<build>/input/<variant>/cards, or prompts if multiple cards exist."
         ),
     )
 
@@ -1997,9 +2177,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default=None,
         help=(
-            "Model selector/root. Normal use: --model 1 or --model 2. "
-            "UI2 then resolves param_cards, SubProcesses and Build from the same model. "
-            "A model-root path is also accepted."
+            "CMake model variant (e.g. example), or legacy model selector/root "
+            "(1 or 2). Defaults to the last successfully generated MG5 model "
+            "from <build>/generated/current_mg5_output.json."
         ),
     )
     parser.add_argument(
@@ -2007,8 +2187,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Advanced discovery root when Model1/Model2 are not next to UI2.py. "
-            "Usually unnecessary."
+            "Advanced project root for locating the CMake build or a legacy model layout. "
+            "Normally inferred from the source or build UI directory."
         ),
     )
 
@@ -2018,7 +2198,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="cards_dir",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Advanced override: parameter-card directory (default: <build>/input/<variant>/cards).",
     )
 
     parser.add_argument(
@@ -2082,7 +2262,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--task",
         choices=["relic", "sigmav"],
         default=None,
-        help="Calculation to trigger after selection. Default: relic.",
+        help="Calculation after selection. Default: sigmav (relic remains paused).",
     )
 
     verbose_group = parser.add_mutually_exclusive_group()
@@ -2120,37 +2300,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--subprocesses",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Advanced override: generated SubProcesses directory (model match enforced).",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Advanced override: effective_SubProcesses selection directory.",
     )
     parser.add_argument(
         "--backup-dir",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Advanced override: backup directory for previous selections.",
     )
     parser.add_argument(
         "--build-dir",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Advanced override: configured CMake build directory.",
     )
     parser.add_argument(
         "--kerrigan",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Advanced override: CMake-generated Kerrigan.sh path.",
     )
     parser.add_argument(
         "--mg5-output",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Advanced override: MadGraph standalone directory with SubProcesses/ and src/.",
     )
     parser.add_argument(
         "--physics-output-root",
@@ -2158,7 +2338,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="physics_output_root",
         type=Path,
         default=None,
-        help=argparse.SUPPRESS,
+        help="Advanced override: Kerrigan physics output directory.",
     )
 
     parser.add_argument(
@@ -2230,7 +2410,7 @@ def main() -> int:
     width_tolerance = float(
         config_value(args.width_tolerance, file_config, "width_tolerance", DEFAULT_WIDTH_TOLERANCE)
     )
-    task = str(config_value(args.task, file_config, "task", "relic")).strip().lower()
+    task = str(config_value(args.task, file_config, "task", "sigmav")).strip().lower()
     task_aliases = {
         "relic_density": "relic",
         "relic-density": "relic",
@@ -2270,10 +2450,14 @@ def main() -> int:
 
     model_value = config_value(args.model, file_config, "model", None)
     project_root_value = config_value(args.project_root, file_config, "project_root", None)
+    build_dir_hint = config_value(args.build_dir, file_config, "build_dir", None)
+    mg5_output_hint = config_value(args.mg5_output, file_config, "mg5_output", None)
     layout = discover_runtime_layout(
         script_root=script_root,
         model_value=model_value,
         project_root_value=project_root_value,
+        build_dir_hint=build_dir_hint,
+        mg5_output_hint=mg5_output_hint,
     )
 
     cards_dir_value = config_value(args.cards_dir, file_config, "cards_dir", layout.cards_dir)
@@ -2287,9 +2471,15 @@ def main() -> int:
         if not cards_dir.is_dir():
             raise FileNotFoundError(f"Parameter-card directory does not exist: {cards_dir}")
         if layout.strict_model_binding and not _is_within(cards_dir, layout.model_root):
-            raise ValueError(
-                "MODEL_CARDS_DIR_MISMATCH: --cards-dir points outside the selected model. "
-                f"Model={layout.model_root}; cards_dir={cards_dir}."
+            cmake_input = (layout.build_dir / "input").resolve() if layout.build_dir else None
+            if (cmake_input is not None and _is_within(cards_dir, cmake_input)) or args.cards_dir is None:
+                raise ValueError(
+                    "MODEL_CARDS_DIR_MISMATCH: cards_dir points into another model "
+                    f"or was inferred outside {layout.model_root}: {cards_dir}."
+                )
+            print(
+                f"WARNING: Explicit external --cards-dir {cards_dir} is outside "
+                f"model {layout.model_root}.", file=sys.stderr,
             )
 
     param_card_value: Optional[object] = args.param_card
@@ -2315,11 +2505,13 @@ def main() -> int:
         layout.backup_root,
     )
 
-    if layout.strict_model_binding and not _is_within(subprocesses_dir, layout.model_root):
-        raise ValueError(
-            "MODEL_SUBPROCESSES_MISMATCH: SubProcesses does not belong to the selected model. "
-            f"Model={layout.model_root}; SubProcesses={subprocesses_dir}."
-        )
+    if layout.strict_model_binding:
+        expected_root = layout.mg5_output or layout.model_root
+        if not _is_within(subprocesses_dir, expected_root):
+            raise ValueError(
+                "MODEL_SUBPROCESSES_MISMATCH: SubProcesses does not belong to the selected model. "
+                f"Expected root={expected_root}; SubProcesses={subprocesses_dir}."
+            )
 
     build_dir_value = config_value(args.build_dir, file_config, "build_dir", layout.build_dir)
     explicit_kerrigan = config_value(args.kerrigan, file_config, "kerrigan", None)
@@ -2332,6 +2524,16 @@ def main() -> int:
 
     mg5_output_value = config_value(args.mg5_output, file_config, "mg5_output", None)
     mg5_output = infer_mg5_output(subprocesses_dir, mg5_output_value)
+    if layout.mg5_output is not None and mg5_output != layout.mg5_output:
+        raise ValueError(
+            f"MODEL_MG5_MISMATCH: standalone output {mg5_output} does not match "
+            f"the selected model {layout.mg5_output}."
+        )
+    if mg5_output is not None and subprocesses_dir.resolve() != (mg5_output / "SubProcesses").resolve():
+        raise ValueError(
+            f"MODEL_MG5_MISMATCH: SubProcesses {subprocesses_dir} does not match "
+            f"--mg5-output {mg5_output}."
+        )
 
     physics_output_value = config_value(
         args.physics_output_root,
