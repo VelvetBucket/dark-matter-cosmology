@@ -21,7 +21,7 @@ shopt -s nullglob
 #   * Never hard-code a user's absolute filesystem path.
 #   * Never overwrite a previous physics run.
 #
-# CMake is expected to replace at least @FOLDER@.  A typical configuration is:
+# CMake substitutes @MADGRAPH_DIR@, @PROCESS_DIR@, @PROCESS_SRC_DIR@ and @PROCESS_LIB_DIR@.  A typical configuration is:
 #
 #   configure_file(
 #       ${CMAKE_SOURCE_DIR}/scripts/Kerrigan.sh.in
@@ -38,7 +38,10 @@ shopt -s nullglob
 # CMake / portable paths
 # ------------------------------------------------------------------------------
 
-CONFIGURED_MG5_BASE_DIR="@FOLDER@"
+CONFIGURED_MG5_BASE_DIR="@MADGRAPH_DIR@"
+CONFIGURED_PROCESS_DIR="@PROCESS_DIR@"
+CONFIGURED_PROCESS_SRC_DIR="@PROCESS_SRC_DIR@"
+CONFIGURED_PROCESS_LIB_DIR="@PROCESS_LIB_DIR@"
 CONFIGURED_SOURCE_DIR="@CMAKE_SOURCE_DIR@"
 CONFIGURED_BUILD_DIR="@CMAKE_BINARY_DIR@"
 
@@ -63,21 +66,29 @@ fi
 MG5_BASE_DIR="${KERRIGAN_MG5_BASE_DIR:-$CONFIGURED_MG5_BASE_DIR}"
 
 if [[ "$MG5_BASE_DIR" == @* || -z "$MG5_BASE_DIR" ]]; then
-    echo "ERROR: @FOLDER@ was not configured." >&2
-    echo "Run CMake with -DFOLDER=/path/to/MG5, or set KERRIGAN_MG5_BASE_DIR." >&2
+    echo "ERROR: MADGRAPH_DIR was not configured by CMake." >&2
+    echo "Run CMake with -DMADGRAPH_DIR=/path/to/MG5, or set KERRIGAN_MG5_BASE_DIR." >&2
     exit 1
 fi
 
 MG5_BASE_DIR="$(cd -- "$MG5_BASE_DIR" && pwd)"
 
+# CMakeLists.txt is authoritative. Do not invent a separate process/ directory.
 DATA_DIR="$BUILD_DIR/data"
 CARDS_DIR_DEFAULT="$DATA_DIR/cards"
 CARDS_DIR="$CARDS_DIR_DEFAULT"
-PROCESS_DIR="$BUILD_DIR/process"
-MODEL_DIR="$BUILD_DIR/model"
-LIB_DIR="$BUILD_DIR/lib"
+PROCESS_DIR="$CONFIGURED_PROCESS_DIR"
+MODEL_DIR="$CONFIGURED_PROCESS_SRC_DIR"  # CMake compiles process_files/src/*.
+LIB_DIR="$CONFIGURED_PROCESS_LIB_DIR"    # CMake links process_files/lib/*.
 BIN_DIR="$BUILD_DIR/bin"
 OUTPUT_ROOT_DEFAULT="$BUILD_DIR/output"
+
+for configured_dir in "$PROCESS_DIR" "$MODEL_DIR" "$LIB_DIR"; do
+    if [[ -z "$configured_dir" || "$configured_dir" == @* || "$configured_dir" != "$BUILD_DIR"/* ]]; then
+        echo "ERROR: An invalid CMake-configured process path was detected: $configured_dir" >&2
+        exit 1
+    fi
+done
 
 # Convenient for interactive use; the script still calls binaries by full path.
 export PATH="$BIN_DIR:$PATH"
@@ -87,6 +98,9 @@ export PATH="$BIN_DIR:$PATH"
 # ------------------------------------------------------------------------------
 
 CARD_SPEC=""
+CARD_SPEC_FROM_CLI=0
+# --variant is optional; it disambiguates the model when more than one exists.
+MODEL_VARIANT_INPUT="${KERRIGAN_VARIANT:-}"
 CARDS_DIR_INPUT="${KERRIGAN_CARDS_DIR:-}"
 MG5_OUTPUT_INPUT="${KERRIGAN_MG5_OUTPUT:-${KERRIGAN_MG5_OUTPUT_NAME:-}}"
 TASK_INPUT="${KERRIGAN_TASK:-}"
@@ -103,22 +117,29 @@ usage() {
     cat <<EOF_USAGE
 Usage:
   ./scripts/Kerrigan.sh <param_card.dat|glob> [options]
+  ./scripts/Kerrigan.sh --selection-report /path/to/UI2_selection.json [options]
 
-Examples:
-  ./scripts/Kerrigan.sh /absolute/path/para_card1.dat --mg5-output scotogenic
-  ./scripts/Kerrigan.sh para_card1.dat --cards-dir /path/to/cards --mg5-output scotogenic
-  ./scripts/Kerrigan.sh para_card1.dat --mg5-output scotogenic --task relic
-  ./scripts/Kerrigan.sh para_card1.dat --mg5-output scotogenic --task sigmav
-  ./scripts/Kerrigan.sh 'para_card*.dat' --mg5-output scotogenic \\
-      --mode combined --candidate Chi_1
+Examples (run from the configured CMake build directory):
+  ./scripts/Kerrigan.sh input/example/cards/example_card.dat --task sigmav --dry-run
+  ./scripts/Kerrigan.sh example_card.dat --variant example --task sigmav
+  ./scripts/Kerrigan.sh --selection-report /path/to/UI2_selection.json --task sigmav
+  ./scripts/Kerrigan.sh /path/to/custom.dat --mg5-output /path/to/standalone \
+      --cards-dir /path/to/cards --process-selector '^P' --output-root /tmp/results
+
+Defaults:
+  MG5 installation/build/process paths are set by CMake.
+  MG5 generated output comes from the UI2 report (if supplied) or from
+  build/generated/current_mg5_output.json (written by run_madgraph.py).
+  A parameter card must be supplied, unless --selection-report provides one.
+  Bare card names are resolved under build/input/<variant>/cards when known.
 
 Options:
-  --cards-dir DIR            Directory used to resolve a card filename/glob.
-                            Default: CMake build data/cards. A full card path
-                            works without this option.
-  --mg5-output NAME|PATH     MG5 output folder. NAME is resolved below @FOLDER@.
-  --task relic|sigmav       relic (default): sigmaV + neq.dat + TOTALS_T.dat.
-                            sigmav: sigmaV + TOTALS_T.dat only.
+  --param-card FILE|GLOB     Alternative to the positional card argument.
+  --cards-dir DIR            Resolve bare card names/globs under this directory.
+  --mg5-output NAME|PATH     Override the auto-detected MG5 standalone output.
+  --variant NAME             Identify a model variant; also accepts --model.
+  --task relic|sigmav        sigmav (default): sigmaV + TOTALS_T.dat only.
+                            relic: existing legacy branch (not part of this fix).
   --mode combined|pdg       Selection mode used by the UI; used in output names.
   --candidate VALUE         Candidate label/name used in output names.
   --candidate-pdg PDG       Candidate PDG, also included in the output name.
@@ -131,7 +152,9 @@ Options:
   -h, --help                Show this help.
 
 Metadata priority:
-  CLI > KERRIGAN_* environment > selector JSON report > safe fallback.
+  CLI > KERRIGAN_* environment > explicit UI2 selection report > MG5 pointer.
+  An explicit UI2 report may provide the card path and process selection.
+  Model/card mismatches are rejected rather than silently combined.
 
 Process-selection priority:
   --process-selector > KERRIGAN_PROCESS_SELECTOR > selector JSON report
@@ -153,6 +176,18 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             exit 0
+            ;;
+        --param-card)
+            [[ $# -ge 2 ]] || { echo "ERROR: --param-card needs a value" >&2; exit 2; }
+            [[ $CARD_SPEC_FROM_CLI -eq 0 ]] || { echo "ERROR: Only one parameter-card argument is accepted." >&2; exit 2; }
+            CARD_SPEC="$2"
+            CARD_SPEC_FROM_CLI=1
+            shift 2
+            ;;
+        --variant|--model)
+            [[ $# -ge 2 ]] || { echo "ERROR: $1 needs a value" >&2; exit 2; }
+            MODEL_VARIANT_INPUT="$2"
+            shift 2
             ;;
         --cards-dir)
             [[ $# -ge 2 ]] || { echo "ERROR: --cards-dir needs a value" >&2; exit 2; }
@@ -214,17 +249,19 @@ while [[ $# -gt 0 ]]; do
             exit 2
             ;;
         *)
-            if [[ -n "$CARD_SPEC" ]]; then
-                echo "ERROR: Only one card name/glob positional argument is accepted." >&2
+            if [[ $CARD_SPEC_FROM_CLI -ne 0 ]]; then
+                echo "ERROR: Only one parameter-card argument is accepted." >&2
                 exit 2
             fi
             CARD_SPEC="$1"
+            CARD_SPEC_FROM_CLI=1
             shift
             ;;
     esac
 done
 
-CARD_SPEC="${CARD_SPEC:-*.dat}"
+# No implicit *.dat: that could silently run the wrong card or several cards.
+# An explicit UI2 selection report can provide the already validated card.
 
 if [[ -n "$CARDS_DIR_INPUT" ]]; then
     CARDS_DIR="$(python3 - "$CARDS_DIR_INPUT" <<'PY_CARDS'
@@ -236,11 +273,11 @@ PY_CARDS
 fi
 
 case "${TASK_INPUT,,}" in
-    ""|relic|relic_density|relic-density|density)
-        TASK="relic"
-        ;;
-    sigmav|sigma_v|sigma-v|sigma)
+    ""|sigmav|sigma_v|sigma-v|sigma)
         TASK="sigmav"
+        ;;
+    relic|relic_density|relic-density|density)
+        TASK="relic"
         ;;
     *)
         echo "ERROR: task must be 'relic' or 'sigmav' (got '$TASK_INPUT')." >&2
@@ -276,28 +313,14 @@ abs_path_if_file() {
 }
 
 find_selection_report() {
-    local -a candidates=()
-
-    if [[ -n "$SELECTION_REPORT" ]]; then
-        candidates+=("$SELECTION_REPORT")
+    # UI2 always passes --selection-report explicitly. Never use an old
+    # unqualified report from a different model merely because it is present.
+    [[ -n "$SELECTION_REPORT" ]] || return 1
+    if [[ ! -f "$SELECTION_REPORT" ]]; then
+        echo "ERROR: UI2 selection report does not exist: $SELECTION_REPORT" >&2
+        return 2
     fi
-
-    candidates+=(
-        "$SOURCE_DIR/effective_SubProcesses_selection.json"
-        "$BUILD_DIR/effective_SubProcesses_selection.json"
-        "$BUILD_DIR/../effective_SubProcesses_selection.json"
-        "$PWD/effective_SubProcesses_selection.json"
-    )
-
-    local candidate
-    for candidate in "${candidates[@]}"; do
-        if [[ -n "$candidate" && -f "$candidate" ]]; then
-            abs_path_if_file "$candidate"
-            return 0
-        fi
-    done
-
-    return 1
+    abs_path_if_file "$SELECTION_REPORT"
 }
 
 read_report_metadata() {
@@ -317,6 +340,7 @@ print(str(candidate.get("name") or ""))
 print(str(candidate.get("pdg") or ""))
 print(str(settings.get("task") or ""))
 print(str(data.get("param_card") or ""))
+print(str(settings.get("mg5_output") or ""))
 PY
 }
 
@@ -335,61 +359,140 @@ for row in data.get("selected_processes") or []:
 PY
 }
 
+# Resolve the MG5 *generated* standalone package, not the MG5 installation.
+# An explicit --mg5-output has priority; otherwise use the UI2 selection
+# report or the pointer written by run_madgraph.py after a successful run.
 resolve_mg5_output_folder() {
     local requested="$1"
-    local report_card_path="${2:-}"
+    local candidate pointer
 
     if [[ -n "$requested" ]]; then
-        if [[ -d "$requested" ]]; then
-            (cd -- "$requested" && pwd)
-            return 0
+        local -a candidates=("$requested" "$BUILD_DIR/$requested"
+            "$BUILD_DIR/generated/$requested" "$BUILD_DIR/output/$requested")
+        if [[ -n "$MODEL_VARIANT_INPUT" ]]; then
+            candidates+=("$BUILD_DIR/output/$MODEL_VARIANT_INPUT/$requested")
         fi
-        if [[ -d "$MG5_BASE_DIR/$requested" ]]; then
-            (cd -- "$MG5_BASE_DIR/$requested" && pwd)
-            return 0
-        fi
-        echo "ERROR: MG5 output '$requested' was not found as a path or under $MG5_BASE_DIR." >&2
+        candidates+=("$MG5_BASE_DIR/$requested")
+        for candidate in "${candidates[@]}"; do
+            if [[ -d "$candidate/SubProcesses" && -d "$candidate/src" ]]; then
+                (cd -- "$candidate" && pwd)
+                return 0
+            fi
+        done
+        echo "ERROR: MG5 standalone output '$requested' not found (requires SubProcesses/ and src/)." >&2
+        echo "Pass the full path using --mg5-output /path/to/standalone." >&2
         return 1
     fi
 
-    # If @FOLDER@ already points directly at an MG5 output, use it.
-    if [[ -d "$MG5_BASE_DIR/SubProcesses" ]]; then
-        printf '%s\n' "$MG5_BASE_DIR"
-        return 0
-    fi
-
-    # If the selector report points to .../<MG5_output>/Experiment/cards/card.dat,
-    # infer the MG5 output without requiring another argument.
-    if [[ -n "$report_card_path" && -f "$report_card_path" ]]; then
-        local p candidate_root
-        p="$(abs_path_if_file "$report_card_path")"
-        candidate_root="$(cd -- "$(dirname -- "$p")/../.." 2>/dev/null && pwd || true)"
-        if [[ -n "$candidate_root" && -d "$candidate_root/SubProcesses" ]]; then
-            printf '%s\n' "$candidate_root"
+    # A user-specified --variant is more specific than the last-generated
+    # pointer. Select only when exactly one standalone is present for it.
+    if [[ -n "$MODEL_VARIANT_INPUT" && -d "$BUILD_DIR/output/$MODEL_VARIANT_INPUT" ]]; then
+        local -a matches=()
+        for candidate in "$BUILD_DIR/output/$MODEL_VARIANT_INPUT"/*; do
+            if [[ -d "$candidate/SubProcesses" && -d "$candidate/src" ]]; then
+                matches+=("$candidate")
+            fi
+        done
+        if [[ ${#matches[@]} -eq 1 ]]; then
+            (cd -- "${matches[0]}" && pwd)
             return 0
+        elif [[ ${#matches[@]} -gt 1 ]]; then
+            echo "ERROR: Multiple generated outputs for variant '$MODEL_VARIANT_INPUT'." >&2
+            echo "Specify --mg5-output /full/path/to/standalone." >&2
+            return 1
         fi
     fi
 
-    # Last safe auto-detection: use the only direct child that looks like an MG5
-    # output.  If there is more than one, force the user to disambiguate.
-    local -a matches=()
-    local child
-    while IFS= read -r -d '' child; do
-        [[ -d "$child/SubProcesses" ]] && matches+=("$child")
-    done < <(find "$MG5_BASE_DIR" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+    pointer="$BUILD_DIR/generated/current_mg5_output.json"
+    if [[ -f "$pointer" ]]; then
+        # Validate that this is a pointer from this build and, if requested,
+        # from the specified model. Do not silently fall back to another model.
+        python3 - "$pointer" "$BUILD_DIR" "$MODEL_VARIANT_INPUT" <<'PY_MG_POINTER'
+import json
+import sys
+from pathlib import Path
 
-    if [[ ${#matches[@]} -eq 1 ]]; then
-        (cd -- "${matches[0]}" && pwd)
-        return 0
+pointer, build_dir, required_variant = sys.argv[1:]
+build = Path(build_dir).resolve()
+try:
+    data = json.loads(Path(pointer).read_text(encoding="utf-8"))
+    output = Path(data["mg5_output"]).expanduser().resolve()
+    if not (output / "SubProcesses").is_dir() or not (output / "src").is_dir():
+        raise ValueError(f"the generated output no longer exists: {output}")
+    recorded_subprocesses = data.get("subprocesses")
+    if recorded_subprocesses and Path(recorded_subprocesses).resolve() != output / "SubProcesses":
+        raise ValueError("SubProcesses pointer disagrees with the output directory")
+    manifest_path = Path(data.get("generation_manifest") or output / "generation_manifest.json")
+    if not manifest_path.is_file():
+        raise ValueError(f"generation manifest not found: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if Path(manifest.get("cmake_build_dir", "")).resolve() != build:
+        raise ValueError("generation manifest belongs to a different CMake build")
+    if Path(manifest.get("output", "")).resolve() != output:
+        raise ValueError("generation manifest/output path mismatch")
+    if required_variant and manifest.get("variant") != required_variant:
+        raise ValueError(
+            f"last generated model is {manifest.get('variant')!r}, "
+            f"not {required_variant!r}; pass --mg5-output explicitly"
+        )
+    print(output)
+except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+    print(f"ERROR: Invalid or stale MadGraph pointer {pointer}: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY_MG_POINTER
+        return $?
     fi
 
-    if [[ ${#matches[@]} -eq 0 ]]; then
-        echo "ERROR: Could not find an MG5 output containing SubProcesses under $MG5_BASE_DIR." >&2
-    else
-        echo "ERROR: Multiple MG5 outputs exist under $MG5_BASE_DIR; use --mg5-output." >&2
-        printf '  - %s\n' "${matches[@]}" >&2
+    # Backward compatible for variants generated before pointer support: only
+    # accept exactly one standalone for a specifically requested model.
+    if [[ -n "$MODEL_VARIANT_INPUT" && -d "$BUILD_DIR/output/$MODEL_VARIANT_INPUT" ]]; then
+        local -a matches=()
+        for candidate in "$BUILD_DIR/output/$MODEL_VARIANT_INPUT"/*; do
+            if [[ -d "$candidate/SubProcesses" && -d "$candidate/src" ]]; then
+                matches+=("$candidate")
+            fi
+        done
+        if [[ ${#matches[@]} -eq 1 ]]; then
+            (cd -- "${matches[0]}" && pwd)
+            return 0
+        fi
+        echo "ERROR: Found ${#matches[@]} standalone outputs for variant '$MODEL_VARIANT_INPUT'." >&2
+        echo "Select one with --mg5-output /full/path/to/standalone." >&2
+        return 1
     fi
+
+    echo "ERROR: No MG5 standalone output is selected and no generation pointer exists:" >&2
+    echo "       $pointer" >&2
+    echo "Generate the model using initiate_model.sh or specify --mg5-output explicitly." >&2
     return 1
+}
+
+# Validate optional manifest (for any selected package) and read its variant.
+# A manifest is required for fully automated model binding. Older outputs can
+# still be used with explicit paths, but will not infer a card directory.
+get_manifest_variant() {
+    local output="$1"
+    local manifest="$output/generation_manifest.json"
+    [[ -f "$manifest" ]] || return 0
+    python3 - "$manifest" "$output" "$BUILD_DIR" "$MODEL_VARIANT_INPUT" <<'PY_MANIFEST'
+import json
+import sys
+from pathlib import Path
+path, output, build, requested_variant = sys.argv[1:]
+try:
+    m = json.loads(Path(path).read_text(encoding="utf-8"))
+    if m.get("output") and Path(m["output"]).resolve() != Path(output).resolve():
+        raise ValueError("manifest output does not match the selected MG5 package")
+    if m.get("cmake_build_dir") and Path(m["cmake_build_dir"]).resolve() != Path(build).resolve():
+        raise ValueError("manifest belongs to a different build directory")
+    variant = m.get("variant") or ""
+    if requested_variant and variant != requested_variant:
+        raise ValueError(f"selected output is variant {variant!r}, not {requested_variant!r}")
+    print(variant)
+except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
+    print(f"ERROR: Invalid MG5 generation manifest: {e}", file=sys.stderr)
+    sys.exit(1)
+PY_MANIFEST
 }
 
 resolve_cards() {
@@ -488,7 +591,11 @@ REPORT_CANDIDATE=""
 REPORT_CANDIDATE_PDG=""
 REPORT_SELECTED_PROCESSES=()
 
-if report_path="$(find_selection_report 2>/dev/null)"; then
+if [[ -n "$SELECTION_REPORT" ]]; then
+    if ! report_path="$(find_selection_report)"; then
+        echo "ERROR: Cannot load --selection-report $SELECTION_REPORT" >&2
+        exit 1
+    fi
     SELECTION_REPORT="$report_path"
     mapfile -t report_meta < <(read_report_metadata "$SELECTION_REPORT")
     REPORT_MODE="${report_meta[0]:-}"
@@ -496,18 +603,23 @@ if report_path="$(find_selection_report 2>/dev/null)"; then
     REPORT_CANDIDATE_PDG="${report_meta[2]:-}"
     REPORT_TASK="${report_meta[3]:-}"
     REPORT_CARD_PATH="${report_meta[4]:-}"
+    REPORT_MG5_OUTPUT="${report_meta[5]:-}"
     mapfile -t REPORT_SELECTED_PROCESSES < <(read_report_selected_processes "$SELECTION_REPORT")
+    if [[ ${#REPORT_SELECTED_PROCESSES[@]} -eq 0 ]]; then
+        echo "ERROR: UI2 selection report contains no selected processes: $SELECTION_REPORT" >&2
+        exit 1
+    fi
 fi
 
-# CLI/environment values were already loaded into *_INPUT.  Fill only missing
-# metadata from the selector report.
+# Metadata priority: CLI/environment > UI2 report > safe defaults.
 MODE="${MODE_INPUT:-$REPORT_MODE}"
 CANDIDATE="${CANDIDATE_INPUT:-$REPORT_CANDIDATE}"
 CANDIDATE_PDG="${CANDIDATE_PDG_INPUT:-$REPORT_CANDIDATE_PDG}"
-
 if [[ -z "$TASK_INPUT" && -n "$REPORT_TASK" ]]; then
     case "${REPORT_TASK,,}" in
-        relic|relic_density|relic-density|density) TASK="relic" ;;
+        relic|relic_density|relic-density|density)
+            # Relic remains paused. Only explicit --task relic opts into it.
+            TASK="sigmav" ;;
         sigmav|sigma_v|sigma-v|sigma) TASK="sigmav" ;;
     esac
 fi
@@ -519,38 +631,87 @@ elif [[ "$MODE" != "combined" && "$MODE" != "pdg" ]]; then
     echo "ERROR: mode must be combined or pdg (got '$MODE')." >&2
     exit 2
 fi
-
 [[ -n "$CANDIDATE" ]] || CANDIDATE="unknown"
 
-# ------------------------------------------------------------------------------
-# Resolve MG5 output + validate build tree
-# ------------------------------------------------------------------------------
+# Choose the already validated parameter card from UI2 if none was supplied.
+# Without a report, require a user-specified card (never guess *.dat).
+if [[ -z "$CARD_SPEC" ]]; then
+    if [[ -n "$REPORT_CARD_PATH" ]]; then
+        CARD_SPEC="$REPORT_CARD_PATH"
+    else
+        echo "ERROR: Specify a parameter card or --selection-report from UI2." >&2
+        echo "Example: scripts/Kerrigan.sh input/example/cards/example_card.dat --task sigmav" >&2
+        exit 2
+    fi
+fi
 
-MG5_OUTPUT_FOLDER="$(resolve_mg5_output_folder "$MG5_OUTPUT_INPUT" "$REPORT_CARD_PATH")"
+# Report MG5 path is authoritative unless the user explicitly overrides it.
+if [[ -z "$MG5_OUTPUT_INPUT" && -n "${REPORT_MG5_OUTPUT:-}" ]]; then
+    MG5_OUTPUT_INPUT="$REPORT_MG5_OUTPUT"
+fi
+
+# CMake build path, model generation, and selection report are distinct sources.
+# Resolve the generator's artifact using an explicit override or a validated
+# pointer produced by run_madgraph.py, not the MadGraph installation root.
+MG5_OUTPUT_FOLDER="$(resolve_mg5_output_folder "$MG5_OUTPUT_INPUT")"
 MG5_OUTPUT_NAME="$(basename -- "$MG5_OUTPUT_FOLDER")"
 SUBPROCESSES_DIR="$MG5_OUTPUT_FOLDER/SubProcesses"
-
-for required_dir in "$SUBPROCESSES_DIR" "$MG5_OUTPUT_FOLDER/src"; do
-    if [[ ! -d "$required_dir" ]]; then
-        echo "ERROR: Required directory not found: $required_dir" >&2
+if [[ -n "${REPORT_MG5_OUTPUT:-}" ]]; then
+    REPORT_MG5_FOLDER="$(resolve_mg5_output_folder "$REPORT_MG5_OUTPUT")"
+    if [[ "$REPORT_MG5_FOLDER" != "$MG5_OUTPUT_FOLDER" ]]; then
+        echo "ERROR: MG5 model output differs from the UI2 selection report." >&2
+        echo "Report: $REPORT_MG5_FOLDER" >&2
+        echo "Chosen: $MG5_OUTPUT_FOLDER" >&2
+        echo "Use a report for the chosen model or run manually without --selection-report." >&2
         exit 1
     fi
-done
+fi
 
-if [[ ! -f "$BUILD_DIR/Makefile" && ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
-    echo "ERROR: '$BUILD_DIR' does not look like the configured build directory." >&2
-    echo "Run CMake first, then use the generated scripts/Kerrigan.sh." >&2
+if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+    echo "ERROR: '$BUILD_DIR' is not a configured CMake build (CMakeCache.txt missing)." >&2
     exit 1
 fi
 
-mkdir -p -- "$PROCESS_DIR" "$MODEL_DIR" "$LIB_DIR" "$BIN_DIR" "$OUTPUT_ROOT"
+MODEL_VARIANT="$(get_manifest_variant "$MG5_OUTPUT_FOLDER")"
+if [[ -z "$MODEL_VARIANT" ]]; then
+    MODEL_VARIANT="$MODEL_VARIANT_INPUT"
+fi
 
-# ------------------------------------------------------------------------------
-# Resolve cards
-# ------------------------------------------------------------------------------
+# Resolve bare card names relative to the model-specific cards directory
+# without choosing the card itself. --cards-dir overrides this default.
+if [[ -z "$CARDS_DIR_INPUT" && -n "$MODEL_VARIANT" && -d "$BUILD_DIR/input/$MODEL_VARIANT/cards" ]]; then
+    CARDS_DIR="$BUILD_DIR/input/$MODEL_VARIANT/cards"
+fi
 
 cards=()
 resolve_cards "$CARD_SPEC" cards
+
+# A UI2 report contains a *specific* validated card, not a wildcard. Do not
+# accidentally run the report's selected processes with another card.
+if [[ -n "$REPORT_CARD_PATH" ]]; then
+    if [[ ! -f "$REPORT_CARD_PATH" ]]; then
+        echo "ERROR: The UI2 report refers to a missing card: $REPORT_CARD_PATH" >&2
+        exit 1
+    fi
+    REPORT_CARD_REAL="$(abs_path_if_file "$REPORT_CARD_PATH")"
+    if [[ ${#cards[@]} -ne 1 || "${cards[0]}" != "$REPORT_CARD_REAL" ]]; then
+        echo "ERROR: Selected card differs from the UI2 report card ($REPORT_CARD_REAL)." >&2
+        echo "Provide the matching card or omit the report and select subprocesses explicitly." >&2
+        exit 1
+    fi
+fi
+
+# If the selected model was generated from build/input/<variant>, cards within
+# a *different* known variant are forbidden. External absolute paths remain
+# available intentionally for advanced parameter scans.
+if [[ -n "$MODEL_VARIANT" ]]; then
+    for card in "${cards[@]}"; do
+        if [[ "$card" == "$BUILD_DIR/input/"* && "$card" != "$BUILD_DIR/input/$MODEL_VARIANT/"* ]]; then
+            echo "ERROR: Parameter card $card belongs to another model variant (expected $MODEL_VARIANT)." >&2
+            exit 1
+        fi
+    done
+fi
 
 # ------------------------------------------------------------------------------
 # Select subprocess folders
@@ -673,8 +834,11 @@ echo "KERRIGAN: configured workflow"
 echo "======================================================================"
 echo "MG5 base           : $MG5_BASE_DIR"
 echo "MG5 output         : $MG5_OUTPUT_FOLDER"
+echo "Model variant      : ${MODEL_VARIANT:-unknown (explicit MG5 output)}"
+echo "Process directory  : $PROCESS_DIR"
 echo "Build directory    : $BUILD_DIR"
 echo "Cards directory    : $CARDS_DIR"
+echo "UI2 report         : ${SELECTION_REPORT:-none (manual run)}"
 echo "Output root        : $OUTPUT_ROOT"
 echo "Task               : $TASK"
 echo "Selection mode     : $MODE"
@@ -690,6 +854,44 @@ echo "======================================================================"
 if [[ $DRY_RUN -eq 1 ]]; then
     echo "Dry run complete: no output, model, library or process file was modified."
     exit 0
+fi
+
+# CMakeLists.txt is intentionally unchanged. It discovers process_files/src
+# files while configuring and initially seeds them from example_process/src.
+# If MG5 generated any NEW C++ filename, the existing build target would not
+# compile it. Fail before modifying files rather than return invalid physics.
+EXAMPLE_PROCESS_SRC="$SOURCE_DIR/example_process/src"
+if [[ ! -d "$EXAMPLE_PROCESS_SRC" ]]; then
+    echo "ERROR: Expected CMake example process sources at $EXAMPLE_PROCESS_SRC." >&2
+    exit 1
+fi
+while IFS= read -r -d '' mg_source; do
+    relative_source="${mg_source#"$MG5_OUTPUT_FOLDER/src/"}"
+    if [[ ! -f "$EXAMPLE_PROCESS_SRC/$relative_source" ]]; then
+        echo "ERROR: MG5 generated a new C++ source: $relative_source" >&2
+        echo "The unchanged CMakeLists.txt cannot reliably register that source at runtime." >&2
+        echo "Stopping safely. A model-specific build adapter would be required for this UFO." >&2
+        exit 1
+    fi
+done < <(find "$MG5_OUTPUT_FOLDER/src" -type f \( -name '*.cc' -o -name '*.cpp' \) -print0)
+while IFS= read -r -d '' baseline_source; do
+    relative_source="${baseline_source#"$EXAMPLE_PROCESS_SRC/"}"
+    if [[ ! -f "$MG5_OUTPUT_FOLDER/src/$relative_source" ]]; then
+        echo "ERROR: MG5 output is missing a C++ source required by the existing CMake target: $relative_source" >&2
+        echo "Stopping before replacing process_files/src." >&2
+        exit 1
+    fi
+done < <(find "$EXAMPLE_PROCESS_SRC" -type f \( -name '*.cc' -o -name '*.cpp' \) -print0)
+
+mkdir -p -- "$PROCESS_DIR" "$MODEL_DIR" "$LIB_DIR" "$BIN_DIR" "$OUTPUT_ROOT"
+
+# Always let the unchanged CMakeLists.txt finish configuration BEFORE copying
+# MG5-generated files. Configuring afterward would restore example_process's
+# CPPProcess.cc/.h and possibly contaminate the selected model sources.
+echo "[setup] Refreshing the existing CMake build before installing MG5 sources..."
+if ! cmake -S "$SOURCE_DIR" -B "$BUILD_DIR"; then
+    echo "ERROR: CMake configuration failed; the selected model was not installed." >&2
+    exit 1
 fi
 
 # Activate the planned output directories only after dry-run has returned.
@@ -743,8 +945,31 @@ else
     echo "WARNING: $MG5_OUTPUT_FOLDER/lib does not exist; keeping current build/lib." >&2
 fi
 
-echo "[setup] Building model library..."
-make -C "$BUILD_DIR" model
+# IMPORTANT: CMake's 'model' target runs UI1 and MadGraph generation; it does
+# not build a model library. Compile its existing core_lib target instead.
+# Install a real CPPProcess before compiling that library. The subsequent loop
+# still recompiles it for every selected channel.
+initial_process=""
+for sp_folder in "${subprocess_folders[@]}"; do
+    if [[ -f "$SUBPROCESSES_DIR/$sp_folder/CPPProcess.cc" &&
+          -f "$SUBPROCESSES_DIR/$sp_folder/CPPProcess.h" ]]; then
+        initial_process="$SUBPROCESSES_DIR/$sp_folder"
+        break
+    fi
+done
+if [[ -z "$initial_process" ]]; then
+    echo "ERROR: No selected MG5 subprocess contains CPPProcess.cc and CPPProcess.h." >&2
+    exit 1
+fi
+cp -a -- "$initial_process/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.cc"
+cp -a -- "$initial_process/CPPProcess.h" "$PROCESS_DIR/CPPProcess.h"
+touch -- "$PROCESS_DIR/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.h"
+
+echo "[setup] Building CMake core_lib for the selected MG5 model..."
+if ! cmake --build "$BUILD_DIR" --target core_lib; then
+    echo "ERROR: Building core_lib failed." >&2
+    exit 1
+fi
 
 sp_number=${#subprocess_folders[@]}
 sp_index=0
@@ -768,11 +993,13 @@ for sp_folder in "${subprocess_folders[@]}"; do
 
     cp -a -- "$sp_source/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.cc"
     cp -a -- "$sp_source/CPPProcess.h" "$PROCESS_DIR/CPPProcess.h"
+    # cp -a preserves the old modification time; force a rebuild explicitly.
+    touch -- "$PROCESS_DIR/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.h"
 
-    if ! make -C "$BUILD_DIR" sigmav; then
-        echo "ERROR: make sigmav failed for $sp_folder" >&2
+    if ! cmake --build "$BUILD_DIR" --target sigmav; then
+        echo "ERROR: CMake sigmav build failed for $sp_folder" >&2
         for card in "${cards[@]}"; do
-            echo "$sp_folder : make sigmav failed" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
+            echo "$sp_folder : CMake sigmav build failed" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
         done
         PIPELINE_FAILED=1
         continue
