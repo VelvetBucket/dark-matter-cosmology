@@ -24,9 +24,9 @@ Selection modes:
    preselection: a state that passes these cuts is not guaranteed to matter
    dynamically.  Its actual importance requires sigma-v information.
 
-2. pdg
-   Manual selection.  The first PDG is the dark-matter candidate and later
-   PDGs request candidate-partner coannihilation channels.
+ 2. pdg
+    Manual selection. UI1 supplies the candidate; --coannihilators lists only
+    partner PDGs. Legacy --pdgs still accepts candidate first (must match UI1).
 
 After selection, both relic-density and sigma-v tasks are delegated to the
 CMake-generated Kerrigan.sh runtime.  --task sigmav computes sigmaV/TOTALS_T
@@ -44,6 +44,7 @@ unambiguous.
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import json
 import math
@@ -173,6 +174,194 @@ class RuntimeLayout:
 
 
 # ---------------------------------------------------------------------------
+# UI1 -> UI2 contract: <build>/input/<variant>/odd_particles.txt
+# ---------------------------------------------------------------------------
+
+UI1_CANDIDATE_HEADER = re.compile(
+    r"^#\s*DM\s+candidate\s*:\s*(\S+)\s+PDG\s*:\s*([+-]?\d+)\s*$",
+    re.IGNORECASE,
+)
+UI1_SM_ABS_PDGS = {
+    1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25,
+}
+
+
+@dataclass(frozen=True)
+class UI1OddSector:
+    source: Path
+    candidate_pdg: Optional[int]
+    candidate_name: Optional[str]
+    dark_pdgs: frozenset[int]
+    dof_by_pdg: dict[int, float]
+    aliases_by_pdg: dict[int, tuple[str, ...]]
+    charges_by_pdg: dict[int, Optional[float]]
+    ufo_directory: Path
+
+
+def _ufo_number(node: ast.AST) -> Optional[float]:
+    """Evaluate only simple numerical AST expressions; never import the UFO."""
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return float(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _ufo_number(node.operand)
+        return (value if isinstance(node.op, ast.UAdd) else -value) if value is not None else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
+        left, right = _ufo_number(node.left), _ufo_number(node.right)
+        if left is None or right is None:
+            return None
+        try:
+            if isinstance(node.op, ast.Add): return left + right
+            if isinstance(node.op, ast.Sub): return left - right
+            if isinstance(node.op, ast.Mult): return left * right
+            if isinstance(node.op, ast.Div): return left / right
+            if isinstance(node.op, ast.Pow): return left ** right
+        except (ValueError, OverflowError, ZeroDivisionError):
+            return None
+    return None
+
+
+def _ufo_species(variant_root: Path) -> tuple[Path, dict[str, tuple[int, Optional[float]]]]:
+    """Resolve names/antiparticle names and PDGs from the same UFO used by UI1."""
+    candidates = sorted(
+        child for child in variant_root.iterdir()
+        if child.is_dir() and (child / "particles.py").is_file()
+    )
+    if (variant_root / "particles.py").is_file():
+        candidates.insert(0, variant_root)
+    if len(candidates) != 1:
+        raise ValueError(
+            f"UI1_SYNC: Expected exactly one UFO with particles.py under {variant_root}; "
+            f"found {len(candidates)}. Resolve model ambiguity before running UI2."
+        )
+    ufo = candidates[0].resolve()
+    tree = ast.parse((ufo / "particles.py").read_text(encoding="utf-8", errors="replace"),
+                     filename=str(ufo / "particles.py"))
+    lookup: dict[str, tuple[int, Optional[float]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        constructor = node.func.id if isinstance(node.func, ast.Name) else (
+            node.func.attr if isinstance(node.func, ast.Attribute) else ""
+        )
+        if constructor != "Particle":
+            continue
+        args = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+        try:
+            name = ast.literal_eval(args["name"])
+            anti = ast.literal_eval(args["antiname"])
+            pdg_raw = _ufo_number(args["pdg_code"])
+            if not isinstance(name, str) or not isinstance(anti, str) or pdg_raw is None:
+                continue
+            if not math.isfinite(pdg_raw) or int(pdg_raw) != pdg_raw:
+                continue
+            pdg = int(pdg_raw)
+        except (KeyError, ValueError, TypeError, SyntaxError):
+            continue
+        charge = _ufo_number(args["charge"]) if "charge" in args else None
+        for alias in (name, anti):
+            # Do not silently assign ambiguous UFO names to different species.
+            existing = lookup.get(alias)
+            record = (abs(pdg), abs(charge) if charge is not None else None)
+            if existing and existing[0] != record[0]:
+                raise ValueError(f"UI1_SYNC: Ambiguous UFO particle name {alias!r}")
+            lookup[alias] = record
+    if not lookup:
+        raise ValueError(f"UI1_SYNC: No UFO particle names/PDGs could be parsed from {ufo}")
+    return ufo, lookup
+
+
+def read_ui1_odd_sector(layout: RuntimeLayout, explicit_path: Optional[Path] = None) -> Optional[UI1OddSector]:
+    """Read UI1's selected Z2-odd sector and candidate, without guessing PDGs."""
+    odd_file = explicit_path.expanduser().resolve() if explicit_path is not None else (
+        layout.model_root / "odd_particles.txt"
+    ).resolve()
+    if not odd_file.is_file():
+        if explicit_path is not None or layout.mg5_output is not None:
+            raise FileNotFoundError(
+                f"UI1_SYNC: Missing {odd_file}; run initiate_model.sh <variant> "
+                "to select the odd sector before using UI2."
+            )
+        return None  # Legacy UI workflow remains supported.
+
+    ufo, by_name = _ufo_species(odd_file.parent)
+    candidate_pdg: Optional[int] = None
+    candidate_name: Optional[str] = None
+    rows: list[tuple[str, str, str, float]] = []
+    saw_table_header = False
+    for line_num, raw in enumerate(odd_file.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            match = UI1_CANDIDATE_HEADER.fullmatch(stripped)
+            if match:
+                if candidate_pdg is not None:
+                    raise ValueError(f"UI1_SYNC: Duplicate DM-candidate header in {odd_file}")
+                candidate_name, candidate_pdg = match.group(1), int(match.group(2))
+            elif all(token in stripped.lower().split() for token in ("particle", "antiparticle", "mass", "dof")):
+                saw_table_header = True
+            continue
+        fields = stripped.split("#", 1)[0].split()
+        if len(fields) != 4:
+            raise ValueError(f"UI1_SYNC: Invalid odd_particles row {line_num} in {odd_file}: expected 4 columns")
+        try:
+            dof = float(fields[3])
+        except ValueError as error:
+            raise ValueError(f"UI1_SYNC: Invalid DOF on line {line_num} of {odd_file}") from error
+        if not math.isfinite(dof) or dof <= 0:
+            raise ValueError(f"UI1_SYNC: DOF must be finite and positive on line {line_num}")
+        rows.append((fields[0], fields[1], fields[2], dof))
+    if not saw_table_header:
+        raise ValueError(f"UI1_SYNC: Missing UI1 four-column header in {odd_file}")
+    if not rows:
+        raise ValueError(f"UI1_SYNC: No particles found in {odd_file}")
+
+    dark: set[int] = set()
+    dof_map: dict[int, float] = {}
+    aliases: dict[int, tuple[str, ...]] = {}
+    charges: dict[int, Optional[float]] = {}
+    for name, anti, _mass, dof in rows:
+        if name not in by_name or anti not in by_name:
+            raise ValueError(
+                f"UI1_SYNC: {name!r}/{anti!r} is not defined in {ufo / 'particles.py'}"
+            )
+        pdg, charge = by_name[name]
+        pdg_anti, _charge_anti = by_name[anti]
+        if pdg != pdg_anti:
+            raise ValueError(f"UI1_SYNC: Mismatched particle/antiparticle PDGs for {name}/{anti}")
+        if pdg in UI1_SM_ABS_PDGS:
+            raise ValueError(f"UI1_SYNC: Standard Model particle {name} (PDG {pdg}) cannot be Z2-odd")
+        if pdg in dark:
+            raise ValueError(f"UI1_SYNC: Duplicate odd-sector PDG {pdg} in {odd_file}")
+        dark.add(pdg)
+        dof_map[pdg] = dof
+        charges[pdg] = charge
+        # MadGraph folder aliases normally come from UFO particle names. Keep
+        # existing scotogenic aliases as a backward-compatible fallback.
+        proposed = list(SCOTOGENIC_FOLDER_ALIASES.get(pdg, ())) + [
+            re.sub(r"[^a-zA-Z0-9]", "", name).lower(),
+            re.sub(r"[^a-zA-Z0-9]", "", anti).lower(),
+        ]
+        aliases[pdg] = tuple(dict.fromkeys(a for a in proposed if a))
+
+    if candidate_pdg is not None:
+        if candidate_pdg not in dark:
+            raise ValueError(f"UI1_SYNC: DM candidate PDG {candidate_pdg} is absent from the odd-sector rows")
+        if candidate_name not in by_name or by_name[candidate_name][0] != candidate_pdg:
+            raise ValueError(
+                f"UI1_SYNC: DM header name {candidate_name!r} and PDG {candidate_pdg} disagree with the UFO"
+            )
+    return UI1OddSector(odd_file, candidate_pdg, candidate_name,
+                        frozenset(dark), dof_map, aliases, charges, ufo)
+
+
+def effective_aliases(pdg: int, model_aliases: Optional[dict[int, tuple[str, ...]]] = None) -> tuple[str, ...]:
+    if model_aliases is not None:
+        return model_aliases.get(pdg, ())
+    return SCOTOGENIC_FOLDER_ALIASES.get(pdg, ())
+
+
+# ---------------------------------------------------------------------------
 # Utility functions
 # ---------------------------------------------------------------------------
 
@@ -200,6 +389,7 @@ def safe_relative_weight(
     candidate: Particle,
     particle: Particle,
     x_ref: float,
+    dof_by_pdg: Optional[dict[int, float]] = None,
 ) -> tuple[float, float]:
     """
     Approximate equilibrium-density ratio:
@@ -220,8 +410,12 @@ def safe_relative_weight(
     if 1.0 + delta <= 0.0:
         return delta, 0.0
 
-    g_candidate = SCOTOGENIC_DOF.get(candidate.pdg, 1.0)
-    g_particle = SCOTOGENIC_DOF.get(particle.pdg, 1.0)
+    if dof_by_pdg is None:
+        g_candidate = SCOTOGENIC_DOF.get(candidate.pdg, 1.0)
+        g_particle = SCOTOGENIC_DOF.get(particle.pdg, 1.0)
+    else:
+        g_candidate = dof_by_pdg[candidate.pdg]
+        g_particle = dof_by_pdg[particle.pdg]
 
     exponent = -x_ref * delta
 
@@ -432,6 +626,8 @@ def validate_candidate(
     allow_unstable: bool,
     allow_nonlightest: bool,
     width_tolerance: float,
+    aliases_by_pdg: Optional[dict[int, tuple[str, ...]]] = None,
+    charges_by_pdg: Optional[dict[int, Optional[float]]] = None,
 ) -> list[str]:
     warnings: list[str] = []
 
@@ -441,11 +637,19 @@ def validate_candidate(
             f"{candidate.mass}"
         )
 
-    if candidate.pdg not in SCOTOGENIC_FOLDER_ALIASES:
+    if not effective_aliases(candidate.pdg, aliases_by_pdg):
         raise ValueError(
             f"No SubProcesses alias is configured for "
             f"{candidate.name} (PDG {candidate.pdg})."
         )
+
+    if charges_by_pdg is not None:
+        charge = charges_by_pdg.get(candidate.pdg)
+        if charge is not None and abs(charge) > 1.0e-12:
+            raise ValueError(
+                f"UI1_SYNC: DM candidate {candidate.name} is electrically charged "
+                f"(|Q|={charge:g}); refusing an inconsistent UI1 candidate."
+            )
 
     if candidate.width is None:
         warnings.append(
@@ -472,6 +676,16 @@ def validate_candidate(
         if particle.pdg != candidate.pdg
         and particle.mass > 0.0
         and particle.mass < candidate.mass * (1.0 - 1.0e-12)
+        # UI1 excludes charged or unstable lighter states as DM candidates.
+        # Unknown charge is NOT treated as a reason to exempt a lighter state.
+        and not (
+            charges_by_pdg is not None
+            and (
+                (charges_by_pdg.get(particle.pdg) is not None
+                 and abs(charges_by_pdg[particle.pdg]) > 1.0e-12)
+                or (particle.width is not None and abs(particle.width) > width_tolerance)
+            )
+        )
     ]
 
     if lighter:
@@ -500,12 +714,13 @@ def build_effective_dark_sector(
     x_ref: float,
     max_delta: float,
     min_relative_weight: float,
+    dof_by_pdg: Optional[dict[int, float]] = None,
 ) -> tuple[set[int], list[DarkSectorDecision]]:
     active_pdgs: set[int] = {candidate.pdg}
     decisions: list[DarkSectorDecision] = []
 
     for particle in dark_particles:
-        delta, weight = safe_relative_weight(candidate, particle, x_ref)
+        delta, weight = safe_relative_weight(candidate, particle, x_ref, dof_by_pdg)
 
         if particle.pdg == candidate.pdg:
             included = True
@@ -586,11 +801,12 @@ def print_dark_sector_table(
 
 def build_alias_lookup(
     dark_particles: list[Particle],
+    aliases_by_pdg: Optional[dict[int, tuple[str, ...]]] = None,
 ) -> tuple[dict[str, int], list[str]]:
     alias_to_pdg: dict[str, int] = {}
 
     for particle in dark_particles:
-        aliases = SCOTOGENIC_FOLDER_ALIASES.get(particle.pdg, ())
+        aliases = effective_aliases(particle.pdg, aliases_by_pdg)
         for alias in aliases:
             if alias in alias_to_pdg and alias_to_pdg[alias] != particle.pdg:
                 raise ValueError(f"Duplicate alias in configuration: {alias}")
@@ -670,14 +886,15 @@ def scan_processes(
     candidate: Particle,
     active_pdgs: set[int],
     mode: str,
+    aliases_by_pdg: Optional[dict[int, tuple[str, ...]]] = None,
 ) -> tuple[list[ProcessRecord], list[str]]:
-    alias_to_pdg, sorted_aliases = build_alias_lookup(dark_particles)
+    alias_to_pdg, sorted_aliases = build_alias_lookup(dark_particles, aliases_by_pdg)
 
     records: list[ProcessRecord] = []
     unparsed: list[str] = []
 
     candidate_aliases = set(
-        SCOTOGENIC_FOLDER_ALIASES.get(candidate.pdg, ())
+        effective_aliases(candidate.pdg, aliases_by_pdg)
     )
 
     for child in sorted(subprocesses_dir.iterdir(), key=lambda path: path.name):
@@ -1004,6 +1221,9 @@ def load_input_file(path: Path) -> dict[str, object]:
     key_aliases = {
         "x_ref": "xf",
         "x-ref": "xf",
+        "coannihilator_pdgs": "coannihilators",
+        "partner_pdgs": "coannihilators",
+        "odd_particles_file": "odd_file",
         "candidate_pdg": "candidate",
         "candidate-pdg": "candidate",
         "process": "task",
@@ -1541,7 +1761,10 @@ def particle_by_pdg(read_particles: list[Particle], pdg: int) -> Particle:
     raise ValueError(f"PDG code {pdg} was not found in Block MASS of the parameter card.")
 
 
-def print_candidate_summary(candidate: Particle) -> None:
+def print_candidate_summary(
+    candidate: Particle,
+    aliases_by_pdg: Optional[dict[int, tuple[str, ...]]] = None,
+) -> None:
     print("\nIdentified Dark Matter Candidate")
     print("-" * 72)
     print(f"Name          : {candidate.name}")
@@ -1557,7 +1780,7 @@ def print_candidate_summary(candidate: Particle) -> None:
     )
     print(
         "Folder aliases: "
-        + ", ".join(SCOTOGENIC_FOLDER_ALIASES[candidate.pdg])
+        + ", ".join(effective_aliases(candidate.pdg, aliases_by_pdg))
     )
     print("-" * 72)
 
@@ -1567,6 +1790,7 @@ def scan_processes_pdg(
     dark_particles: list[Particle],
     candidate: Particle,
     requested_pdgs: list[int],
+    aliases_by_pdg: Optional[dict[int, tuple[str, ...]]] = None,
 ) -> tuple[list[ProcessRecord], list[str], list[ManualPDGDecision], list[str]]:
     """
     Manual PDG selection.
@@ -1593,13 +1817,13 @@ def scan_processes_pdg(
     # SubProcesses token.
     for pdg in [candidate_pdg] + partner_pdgs:
         particle = particle_by_pdg(dark_particles, pdg)
-        if pdg not in SCOTOGENIC_FOLDER_ALIASES:
+        if not effective_aliases(pdg, aliases_by_pdg):
             raise ValueError(
                 f"{pdg} ({particle.name}) exists in the parameter card but has no configured initial-state "
                 "alias for SubProcesses."
             )
 
-    alias_to_pdg, sorted_aliases = build_alias_lookup(dark_particles)
+    alias_to_pdg, sorted_aliases = build_alias_lookup(dark_particles, aliases_by_pdg)
 
     parsed_rows: list[tuple[Path, str, str, str, str, int, int]] = []
     unparsed: list[str] = []
@@ -2211,7 +2435,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--candidate",
         default=None,
-        help="Candidate name, alias or PDG for combined mode.",
+        help="Advanced check: candidate name/PDG must match UI1 when odd_particles.txt has a DM header.",
     )
 
     parser.add_argument(
@@ -2220,9 +2444,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Manual PDG mode. First PDG is the DM candidate; later PDGs are "
-            "requested candidate coannihilation partners."
+            "Legacy manual PDG mode. First PDG must match UI1's DM candidate; "
+            "remaining PDGs are coannihilation partners. Prefer --coannihilators."
         ),
+    )
+
+    parser.add_argument(
+        "--coannihilators", "--partner-pdgs",
+        nargs="+", type=int, default=None,
+        help="Manual PDG mode: partner PDGs only; DM candidate is read from UI1.",
+    )
+    parser.add_argument(
+        "--odd-file", type=Path, default=None,
+        help="Advanced override: UI1 odd_particles.txt path (must belong to selected model).",
     )
 
     parser.add_argument(
@@ -2393,9 +2627,14 @@ def main() -> int:
         else parse_pdg_tokens(pdgs_file)
     )
 
+    partners_value = config_value(args.coannihilators, file_config, "coannihilators", None)
+    partner_pdgs = parse_pdg_tokens(partners_value)
+    if manual_pdgs and partner_pdgs:
+        raise ValueError("Use either --pdgs (legacy full list) or --coannihilators (partners only), not both.")
+
     mode_value = config_value(args.mode, file_config, "mode", None)
     if mode_value is None:
-        mode = "pdg" if manual_pdgs else "combined"
+        mode = "pdg" if (manual_pdgs or partner_pdgs) else "combined"
     else:
         mode = str(mode_value).strip().lower()
 
@@ -2421,8 +2660,8 @@ def main() -> int:
     }
     task = task_aliases.get(task, task)
 
-    if task not in {"relic", "sigmav"}:
-        raise ValueError("task must be 'relic' or 'sigmav'.")
+    if task != "sigmav":
+        raise ValueError("Relic-density calculations are paused; use --task sigmav.")
 
     if xf <= 0.0:
         raise ValueError("--xf must be positive.")
@@ -2559,49 +2798,113 @@ def main() -> int:
 
     read_particles = read_param_card(param_card)
 
+    # UI1's confirmed odd-sector configuration is authoritative for CMake models.
+    odd_file_value = config_value(args.odd_file, file_config, "odd_file", None)
+    explicit_odd_file = Path(str(odd_file_value)) if odd_file_value is not None else None
+    if explicit_odd_file is not None and layout.strict_model_binding:
+        if not _is_within(explicit_odd_file, layout.model_root):
+            raise ValueError("UI1_SYNC: --odd-file cannot point outside the selected model root")
+    ui1_sector = read_ui1_odd_sector(layout, explicit_odd_file)
+    if ui1_sector is not None and layout.cards_dir is not None:
+        model_cards = list_param_cards(layout.cards_dir)
+        if len(model_cards) > 1:
+            print(
+                "WARNING: UI1's odd_particles.txt does not record which parameter "
+                "card was used to determine its DM candidate. More than one card "
+                f"exists in {layout.cards_dir}; validate that {param_card} is the "
+                "same physics point selected in UI1. UI2 will independently "
+                "revalidate the candidate against this card.",
+                file=sys.stderr,
+            )
+
     dark_pdgs_value = config_value(args.dark_pdgs, file_config, "dark_pdgs", None)
     requested_dark_pdgs = parse_dark_pdgs(
         None if dark_pdgs_value is None else str(dark_pdgs_value)
     )
-    dark_particles = get_dark_particles(read_particles, requested_dark_pdgs)
+    aliases_by_pdg = None if ui1_sector is None else ui1_sector.aliases_by_pdg
+    dof_by_pdg = None if ui1_sector is None else ui1_sector.dof_by_pdg
+    charges_by_pdg = None if ui1_sector is None else ui1_sector.charges_by_pdg
+
+    if ui1_sector is not None:
+        if requested_dark_pdgs is not None and requested_dark_pdgs != ui1_sector.dark_pdgs:
+            raise ValueError(
+                "UI1_SYNC: --dark-pdgs conflicts with UI1 odd_particles.txt; "
+                "rerun UI1 to change the Z2-odd sector."
+            )
+        selected_odd_pdgs = set(ui1_sector.dark_pdgs)
+        available = {p.pdg for p in read_particles}
+        missing = sorted(selected_odd_pdgs - available)
+        if missing:
+            raise ValueError(
+                f"UI1_SYNC: UI1 odd-sector PDGs {missing} are absent from {param_card}; "
+                "select the correct card for this model."
+            )
+        dark_particles = get_dark_particles(read_particles, selected_odd_pdgs)
+    else:
+        dark_particles = get_dark_particles(read_particles, requested_dark_pdgs)
 
     candidate_config = config_value(args.candidate, file_config, "candidate", None)
+    ui1_candidate = None
+    if ui1_sector is not None and ui1_sector.candidate_pdg is not None:
+        ui1_candidate = particle_by_pdg(read_particles, ui1_sector.candidate_pdg)
+        if candidate_config is not None:
+            user_candidate = resolve_candidate(str(candidate_config), read_particles)
+            if user_candidate.pdg != ui1_candidate.pdg:
+                raise ValueError(
+                    f"UI1_SYNC: --candidate PDG {user_candidate.pdg} conflicts with "
+                    f"UI1 DM candidate PDG {ui1_candidate.pdg}. Rerun UI1 to change the candidate."
+                )
+        print(f"UI1 dark-matter candidate: {ui1_sector.candidate_name} "
+              f"(PDG {ui1_candidate.pdg}), read from {ui1_sector.source}")
+    elif ui1_sector is not None:
+        # Older four-column UI1 output is accepted but must not imply a DM identity.
+        print(f"WARNING: {ui1_sector.source} has no DM-candidate metadata; "
+              "supply --candidate or rerun the updated UI1.", file=sys.stderr)
 
     if mode == "pdg":
-        if not manual_pdgs:
-            if not sys.stdin.isatty():
-                raise ValueError(
-                    "PDG mode requires --pdgs or pdgs=... in the input file."
+        if partner_pdgs:
+            if ui1_candidate is None:
+                raise ValueError("--coannihilators requires UI1 DM-candidate metadata; use --pdgs otherwise.")
+            manual_pdgs = [ui1_candidate.pdg] + unique_pdgs(partner_pdgs)
+        elif not manual_pdgs:
+            if ui1_candidate is not None:
+                manual_pdgs = [ui1_candidate.pdg]  # Candidate-only channel selection.
+            elif not sys.stdin.isatty():
+                raise ValueError("PDG mode requires --pdgs or UI1 DM-candidate metadata.")
+            else:
+                manual_pdgs = parse_pdg_tokens(
+                    input("Enter PDG codes (candidate first, then partners): ")
                 )
-            manual_pdgs = parse_pdg_tokens(
-                input(
-                    "Enter PDG codes (candidate first, followed by coannihilators): "
-                )
-            )
-
-        if not manual_pdgs:
-            raise ValueError("PDG mode requires at least the candidate's PDG code.")
-
         manual_pdgs = unique_pdgs(manual_pdgs)
+        if not manual_pdgs:
+            raise ValueError("PDG mode requires a DM candidate.")
         candidate = particle_by_pdg(read_particles, manual_pdgs[0])
-
+        if ui1_candidate is not None and candidate.pdg != ui1_candidate.pdg:
+            raise ValueError(
+                f"UI1_SYNC: First --pdgs value {candidate.pdg} is not the UI1 DM candidate "
+                f"{ui1_candidate.pdg}. Use --coannihilators for a partner-only list."
+            )
         if candidate_config is not None:
             candidate_from_flag = resolve_candidate(str(candidate_config), read_particles)
             if candidate_from_flag.pdg != candidate.pdg:
-                raise ValueError(
-                    f"--candidate/input candidate={candidate_from_flag.pdg} does not match the first "
-                    f"manually supplied PDG ({candidate.pdg})."
-                )
-
+                raise ValueError("--candidate does not match the selected DM candidate in PDG mode.")
+        if ui1_sector is not None:
+            unexpected = sorted(set(manual_pdgs) - ui1_sector.dark_pdgs)
+            if unexpected:
+                raise ValueError(f"UI1_SYNC: Requested PDGs {unexpected} are not in UI1 odd_particles.txt")
     else:
-        candidate_query = candidate_config
-        if candidate_query is None:
-            if not sys.stdin.isatty():
-                raise ValueError(
-                    "Combined mode requires --candidate or candidate=... in the input file."
-                )
-            candidate_query = input("\nEnter the candidate's name, alias, or PDG code: ")
-        candidate = resolve_candidate(str(candidate_query), read_particles)
+        if ui1_candidate is not None:
+            candidate = ui1_candidate
+        else:
+            candidate_query = candidate_config
+            if candidate_query is None:
+                if not sys.stdin.isatty():
+                    raise ValueError("UI1 metadata is missing; rerun UI1 or explicitly supply --candidate.")
+                candidate_query = input("\nEnter the candidate's name, alias, or PDG code: ")
+            candidate = resolve_candidate(str(candidate_query), read_particles)
+
+    if ui1_sector is not None and candidate.pdg not in ui1_sector.dark_pdgs:
+        raise ValueError("UI1_SYNC: DM candidate is not part of the confirmed UI1 odd sector")
 
     warnings = validate_candidate(
         candidate=candidate,
@@ -2609,11 +2912,13 @@ def main() -> int:
         allow_unstable=args.allow_unstable_candidate,
         allow_nonlightest=args.allow_nonlightest_candidate,
         width_tolerance=width_tolerance,
+        aliases_by_pdg=aliases_by_pdg,
+        charges_by_pdg=charges_by_pdg,
     )
 
     if verbose:
         print_particle_table(read_particles)
-        print_candidate_summary(candidate)
+        print_candidate_summary(candidate, aliases_by_pdg)
         for warning in warnings:
             print(f"WARNING: {warning}")
 
@@ -2625,6 +2930,7 @@ def main() -> int:
             x_ref=xf,
             max_delta=max_delta,
             min_relative_weight=min_relative_weight,
+            dof_by_pdg=dof_by_pdg,
         )
 
         records, unparsed = scan_processes(
@@ -2633,6 +2939,7 @@ def main() -> int:
             candidate=candidate,
             active_pdgs=active_pdgs,
             mode="combined",
+            aliases_by_pdg=aliases_by_pdg,
         )
 
         manual_decisions: list[ManualPDGDecision] = []
@@ -2659,6 +2966,7 @@ def main() -> int:
             dark_particles=dark_particles,
             candidate=candidate,
             requested_pdgs=manual_pdgs,
+            aliases_by_pdg=aliases_by_pdg,
         )
 
         active_pdgs = {candidate.pdg}
@@ -2757,6 +3065,10 @@ def main() -> int:
     settings = {
         "model": layout.model_label,
         "model_root": str(layout.model_root),
+        "ui1_odd_particles": None if ui1_sector is None else str(ui1_sector.source),
+        "ui1_dm_candidate_pdg": None if ui1_sector is None else ui1_sector.candidate_pdg,
+        "ui1_dof_by_pdg": {} if ui1_sector is None else {str(k): v for k,v in ui1_sector.dof_by_pdg.items()},
+        "ufo_source": None if ui1_sector is None else str(ui1_sector.ufo_directory),
         "strict_model_binding": layout.strict_model_binding,
         "selection_stage": (
             "thermal_preselection_before_sigmav" if mode == "combined" else "manual_pdg_selection"
