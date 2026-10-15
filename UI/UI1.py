@@ -2,28 +2,45 @@
 
 import argparse
 import ast
+import math
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+
+# ============================================================
+# Configuration
+# ============================================================
+
+# Physical Standard-Model PDGs that must never be part of the
+# Z2-odd BSM sector selected by UI1.
+SM_ABS_PDGS = {
+    1, 2, 3, 4, 5, 6,        # quarks
+    11, 12, 13, 14, 15, 16,  # charged leptons and neutrinos
+    21, 22, 23, 24, 25,      # g, gamma, Z, W, h
+}
+
+PARAM_CARD_DIR_NAMES = (
+    "cards",
+    "Cards",
+    "param_cards",
+    "ParamCards",
+    "paramcards",
+)
+
+STABILITY_WIDTH_TOLERANCE = 1.0e-30
+MASS_DEGENERACY_RTOL = 1.0e-12
+MASS_DEGENERACY_ATOL = 1.0e-12
+CHARGE_TOLERANCE = 1.0e-12
+
 
 # ============================================================
 # UFO parsing helpers
 # ============================================================
 
 def get_keyword_node(call, keyword_name):
-    """
-    Return the AST node corresponding to a keyword argument.
-
-    Example:
-
-        Particle(
-            name='n1',
-            spin=2,
-            mass=Param.MN1,
-            ...
-        )
-    """
+    """Return the AST node corresponding to a keyword argument."""
     for keyword in call.keywords:
         if keyword.arg == keyword_name:
             return keyword.value
@@ -45,11 +62,11 @@ def evaluate_number(node):
     Safely evaluate simple numerical AST expressions.
 
     Supports, for example:
-
         1
         -1
         2/3
         -2/3
+        1.0e3
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return node.value
@@ -79,6 +96,9 @@ def evaluate_number(node):
         if isinstance(node.op, ast.Sub):
             return left - right
 
+        if isinstance(node.op, ast.Pow):
+            return left ** right
+
     raise ValueError("Not a simple numerical expression")
 
 
@@ -90,7 +110,7 @@ def get_number_keyword(call, keyword_name):
 
     try:
         return evaluate_number(node)
-    except (TypeError, ValueError, ZeroDivisionError):
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
         return None
 
 
@@ -99,11 +119,10 @@ def get_reference_keyword(call, keyword_name):
     Extract the name of a referenced UFO object.
 
     Examples:
-
-        mass = Param.MN1  ->  "MN1"
-        mass = P.MetR     ->  "MetR"
-        mass = ZERO       ->  "ZERO"
-        mass = Param.ZERO ->  "ZERO"
+        mass = Param.MN1  -> "MN1"
+        mass = P.MetR     -> "MetR"
+        mass = ZERO       -> "ZERO"
+        mass = Param.ZERO -> "ZERO"
     """
     node = get_keyword_node(call, keyword_name)
 
@@ -132,37 +151,63 @@ def get_reference_keyword(call, keyword_name):
         return None
 
 
-def is_particle_constructor(call):
-    """
-    Detect both:
-
-        Particle(...)
-
-    and:
-
-        object_library.Particle(...)
-    """
+def is_constructor(call, constructor_name):
     if isinstance(call.func, ast.Name):
-        return call.func.id == "Particle"
+        return call.func.id == constructor_name
 
     if isinstance(call.func, ast.Attribute):
-        return call.func.attr == "Particle"
+        return call.func.attr == constructor_name
 
     return False
 
 
+def is_particle_constructor(call):
+    return is_constructor(call, "Particle")
+
+
+def is_parameter_constructor(call):
+    return is_constructor(call, "Parameter")
+
+
+def parse_numeric_text(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip().replace("D", "E").replace("d", "e")
+
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def evaluate_parameter_value(node):
+    if node is None:
+        return None
+
+    try:
+        return float(evaluate_number(node))
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        pass
+
+    if isinstance(node, ast.Constant):
+        return parse_numeric_text(node.value)
+
+    return None
+
+
 # ============================================================
-# Ghost detection
+# Physical-particle filtering
 # ============================================================
 
 def is_ghost_particle(call):
     """
     Ghosts in UFO models usually satisfy at least one of:
-
         GhostNumber != 0
         spin == -1
-
-    They are completely excluded from the UI.
     """
     ghost_number = get_number_keyword(call, "GhostNumber")
     spin = get_number_keyword(call, "spin")
@@ -176,18 +221,51 @@ def is_ghost_particle(call):
     return False
 
 
+def is_goldstone_particle(call):
+    value = get_number_keyword(call, "goldstone")
+
+    if value is None:
+        value = get_number_keyword(call, "goldstoneboson")
+
+    return bool(value) if value is not None else False
+
+
+def is_nonpropagating_particle(call):
+    node = get_keyword_node(call, "propagating")
+
+    if node is None:
+        return False
+
+    if isinstance(node, ast.Constant):
+        return node.value is False
+
+    return False
+
+
+def is_standard_model_species(species):
+    pdg = species.get("pdg")
+
+    if pdg is None:
+        return False
+
+    try:
+        return abs(int(pdg)) in SM_ABS_PDGS
+    except (TypeError, ValueError):
+        return False
+
+
+def has_odd_marker(species):
+    return (
+        str(species.get("name", "")).startswith("~")
+        or str(species.get("antiname", "")).startswith("~")
+    )
+
+
 # ============================================================
 # Degrees of freedom
 # ============================================================
 
 def is_massless(mass_parameter):
-    """
-    In UFO models a massless particle is normally represented by:
-
-        mass = Param.ZERO
-
-    or an equivalent ZERO reference.
-    """
     if mass_parameter is None:
         return False
 
@@ -221,60 +299,30 @@ def calculate_dof(spin, name, antiname, mass_parameter):
         particle + antiparticle    -> 6
 
     UFO convention:
-
         spin = 1  -> physical spin 0
         spin = 2  -> physical spin 1/2
         spin = 3  -> physical spin 1
     """
     self_conjugate = (name == antiname)
 
-    # --------------------------------------------------------
-    # Spin 0
-    # UFO spin = 1
-    # --------------------------------------------------------
     if spin == 1:
-        if self_conjugate:
-            return 1
-        else:
-            return 2
+        return 1 if self_conjugate else 2
 
-    # --------------------------------------------------------
-    # Spin 1/2
-    # UFO spin = 2
-    # --------------------------------------------------------
     if spin == 2:
-        if self_conjugate:
-            return 2
-        else:
-            return 4
+        return 2 if self_conjugate else 4
 
-    # --------------------------------------------------------
-    # Spin 1
-    # UFO spin = 3
-    # --------------------------------------------------------
     if spin == 3:
         massless = is_massless(mass_parameter)
 
         if massless:
-            if self_conjugate:
-                return 2
-            else:
-                return 4
+            return 2 if self_conjugate else 4
 
-        else:
-            if self_conjugate:
-                return 3
-            else:
-                return 6
+        return 3 if self_conjugate else 6
 
-    # Other spins are not covered by the rules currently used.
     return None
 
 
 def ufo_spin_to_physical(spin):
-    """
-    Convert the UFO convention (2S+1) to readable physical spin.
-    """
     if spin == 1:
         return "0"
 
@@ -291,7 +339,7 @@ def ufo_spin_to_physical(spin):
 
 
 # ============================================================
-# Read particles.py
+# Read particles.py and parameters.py
 # ============================================================
 
 def read_ufo_particles(particles_file):
@@ -303,9 +351,8 @@ def read_ufo_particles(particles_file):
     try:
         tree = ast.parse(
             source,
-            filename=str(particles_file)
+            filename=str(particles_file),
         )
-
     except SyntaxError as exc:
         raise RuntimeError(
             f"Could not parse UFO file:\n"
@@ -316,15 +363,19 @@ def read_ufo_particles(particles_file):
     particles = []
 
     for node in ast.walk(tree):
-
         if not isinstance(node, ast.Call):
             continue
 
         if not is_particle_constructor(node):
             continue
 
-        # Ignore all ghost particles
         if is_ghost_particle(node):
+            continue
+
+        if is_goldstone_particle(node):
+            continue
+
+        if is_nonpropagating_particle(node):
             continue
 
         name = get_string_keyword(node, "name")
@@ -338,12 +389,13 @@ def read_ufo_particles(particles_file):
 
         spin = get_number_keyword(node, "spin")
         mass = get_reference_keyword(node, "mass")
+        width = get_reference_keyword(node, "width")
 
         dof = calculate_dof(
             spin,
             name,
             antiname,
-            mass
+            mass,
         )
 
         particles.append({
@@ -353,6 +405,7 @@ def read_ufo_particles(particles_file):
             "charge": get_number_keyword(node, "charge"),
             "spin": spin,
             "mass": mass,
+            "width": width,
             "dof": dof,
         })
 
@@ -365,26 +418,65 @@ def read_ufo_particles(particles_file):
     return particles
 
 
+def read_ufo_parameter_values(parameters_file):
+    """
+    Read numerical default values from UFO parameters.py.
+
+    Only values that can be evaluated safely as simple numbers are retained.
+    This is enough for normal external mass/width parameters and ZERO.
+    """
+    if not parameters_file.is_file():
+        raise RuntimeError(
+            "UFO parameters.py was not found:\n"
+            f"  {parameters_file}"
+        )
+
+    try:
+        source = parameters_file.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        source = parameters_file.read_text(encoding="latin-1")
+
+    try:
+        tree = ast.parse(source, filename=str(parameters_file))
+    except SyntaxError as exc:
+        raise RuntimeError(
+            f"Could not parse UFO parameters file:\n"
+            f"{parameters_file}\n\n"
+            f"{exc}"
+        ) from exc
+
+    values = {}
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+
+        if not is_parameter_constructor(node):
+            continue
+
+        name = get_string_keyword(node, "name")
+
+        if name is None:
+            continue
+
+        value_node = get_keyword_node(node, "value")
+        value = evaluate_parameter_value(value_node)
+
+        if value is not None and math.isfinite(value):
+            values[name] = float(value)
+
+    values.setdefault("ZERO", 0.0)
+
+    return values
+
+
 # ============================================================
 # Particle / antiparticle species
 # ============================================================
 
 def build_particle_species(particles):
     """
-    Combine particle-antiparticle pairs into a single
-    user-facing species.
-
-    Example:
-
-        et+ / et-
-
-    instead of presenting et+ and et- separately.
-
-    The DOF represents the COMPLETE species:
-
-        et+ / et-  -> 2
-
-    rather than 2 per particle.
+    Combine particle-antiparticle pairs into one physical species.
     """
     species = []
     seen = set()
@@ -407,6 +499,7 @@ def build_particle_species(particles):
             "charge": particle["charge"],
             "spin": particle["spin"],
             "mass": particle["mass"],
+            "width": particle["width"],
             "dof": particle["dof"],
         })
 
@@ -414,20 +507,10 @@ def build_particle_species(particles):
 
 
 # ============================================================
-# Input directory and UFO detection
+# Input directory, variant and UFO detection
 # ============================================================
 
 def find_input_directory(explicit_path=None):
-    """
-    Locate the ExtraDM build input directory.
-
-    Priority:
-        1. explicit --input-dir
-        2. $INPUT_DIR from the environment
-        3. cwd/input
-        4. cwd/build/input
-        5. <UI1.py>/../../build/input
-    """
     candidates = []
 
     if explicit_path is not None:
@@ -461,23 +544,6 @@ def find_input_directory(explicit_path=None):
 
 
 def find_variant_directory(input_dir, variant_name):
-    """
-    Return the variant directory inside input_dir.
-
-    Layout expected:
-
-        input/
-        ├── var1/
-        │   ├── <UFO model>/        # contains particles.py
-        │   ├── param_cards/        # ignored by the UFO detection
-        │   └── ...
-        ├── var2/
-        │   └── ...
-        └── ...
-
-    Exactly one UFO model (identified by particles.py) is
-    expected under input/<variant_name>/ (at any depth up to 2).
-    """
     variant_dir = (input_dir / variant_name).resolve()
 
     if not variant_dir.is_dir():
@@ -494,21 +560,16 @@ def find_variant_directory(input_dir, variant_name):
 
 def find_ufo_directory(variant_dir):
     """
-    Find the single UFO model directory inside variant_dir.
+    Find exactly one UFO inside the active variant.
 
-    A UFO model is identified by the presence of particles.py.
-
-    The search is limited to the variant directory itself and
-    one level below it, so that auxiliary directories such as
-    param_cards/ do not confuse the detection.
+    The search never leaves variant_dir, which keeps different model variants
+    isolated from one another.
     """
     candidates = []
 
-    # The variant directory itself may be the UFO model
     if (variant_dir / "particles.py").is_file():
         candidates.append(variant_dir)
 
-    # Or the UFO model may be a direct subdirectory
     for item in variant_dir.iterdir():
         if not item.is_dir():
             continue
@@ -520,16 +581,7 @@ def find_ufo_directory(variant_dir):
         raise RuntimeError(
             "No UFO model was found inside:\n"
             f"  {variant_dir}\n\n"
-            "Expected something like:\n\n"
-            f"  {variant_dir.name}/\n"
-            "  ├── model_UFO/\n"
-            "  │   ├── particles.py\n"
-            "  │   ├── parameters.py\n"
-            "  │   └── ...\n"
-            "  ├── param_cards/\n"
-            "  └── ...\n\n"
-            "A UFO model is any directory that contains "
-            "particles.py."
+            "Expected a UFO directory containing particles.py."
         )
 
     if len(candidates) > 1:
@@ -541,11 +593,276 @@ def find_ufo_directory(variant_dir):
         raise RuntimeError(
             "More than one UFO model was found inside:\n"
             f"  {variant_dir}\n\n"
-            "Exactly one UFO model is expected.\n\n"
+            "Exactly one UFO model is expected per variant.\n\n"
             f"Found:\n{models}"
         )
 
     return candidates[0]
+
+
+# ============================================================
+# Parameter-card discovery and parsing
+# ============================================================
+
+def is_within(path, root):
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def find_variant_param_cards(variant_dir):
+    """
+    Find parameter cards ONLY inside the active variant.
+
+    This deliberately never scans sibling variants, preventing a card from
+    model A from being combined with the UFO of model B.
+    """
+    cards = []
+    seen = set()
+
+    for directory_name in PARAM_CARD_DIR_NAMES:
+        directory = variant_dir / directory_name
+
+        if not directory.is_dir():
+            continue
+
+        for card in sorted(directory.glob("*.dat")):
+            if not card.is_file():
+                continue
+
+            resolved = card.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                cards.append(resolved)
+
+    # Also accept conventional param_card*.dat files placed directly in the
+    # variant directory.
+    for card in sorted(variant_dir.glob("param_card*.dat")):
+        if not card.is_file():
+            continue
+
+        resolved = card.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            cards.append(resolved)
+
+    return cards
+
+
+def choose_variant_param_card(variant_dir):
+    cards = find_variant_param_cards(variant_dir)
+
+    if not cards:
+        print()
+        print("No parameter card was found for this variant.")
+        print("DM-candidate masses and widths will use UFO default values.")
+        return None
+
+    if len(cards) == 1:
+        print()
+        print("Parameter card found for this variant:")
+        print(f"  {cards[0]}")
+        print("It will be used to determine masses and decay widths.")
+        return cards[0]
+
+    print()
+    print("Several parameter cards were found inside the active variant:")
+    print()
+
+    for index, card in enumerate(cards, start=1):
+        print(f"  {index}. {card.relative_to(variant_dir)}")
+
+    print()
+
+    while True:
+        answer = input(
+            "Select the parameter card to use for DM-candidate determination: "
+        ).strip()
+
+        try:
+            index = int(answer)
+        except ValueError:
+            index = 0
+
+        if 1 <= index <= len(cards):
+            selected = cards[index - 1]
+
+            if not is_within(selected, variant_dir):
+                raise RuntimeError(
+                    "Internal error: the selected parameter card is outside "
+                    "the active variant."
+                )
+
+            return selected
+
+        print("Please enter one of the listed numbers.")
+
+
+def parse_slha_number(text):
+    try:
+        return float(text.replace("D", "E").replace("d", "e"))
+    except ValueError:
+        return None
+
+
+def read_param_card_mass_widths(param_card):
+    masses = {}
+    widths = {}
+    current_block = None
+
+    try:
+        lines = param_card.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines()
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not read parameter card:\n  {param_card}\n\n{exc}"
+        ) from exc
+
+    for raw_line in lines:
+        body = raw_line.split("#", 1)[0].strip()
+
+        if not body:
+            continue
+
+        fields = body.split()
+        keyword = fields[0].lower()
+
+        if keyword == "block" and len(fields) >= 2:
+            current_block = fields[1].lower()
+            continue
+
+        if keyword == "decay" and len(fields) >= 3:
+            try:
+                pdg = abs(int(fields[1]))
+            except ValueError:
+                current_block = None
+                continue
+
+            width = parse_slha_number(fields[2])
+
+            if width is not None:
+                widths[pdg] = width
+
+            current_block = None
+            continue
+
+        if current_block != "mass":
+            continue
+
+        if len(fields) < 2:
+            continue
+
+        try:
+            pdg = abs(int(fields[0]))
+        except ValueError:
+            continue
+
+        mass = parse_slha_number(fields[1])
+
+        if mass is not None:
+            masses[pdg] = mass
+
+    return masses, widths
+
+
+# ============================================================
+# Numerical mass/width resolution
+# ============================================================
+
+def resolve_ufo_reference(reference, parameter_values):
+    if reference is None:
+        return None
+
+    text = str(reference).strip()
+
+    if text.upper() == "ZERO":
+        return 0.0
+
+    direct = parse_numeric_text(text)
+
+    if direct is not None:
+        return direct
+
+    value = parameter_values.get(text)
+
+    if value is None:
+        return None
+
+    return float(value)
+
+
+def resolve_selected_properties(
+    selected,
+    parameter_values,
+    param_card,
+    card_masses,
+    card_widths,
+):
+    resolved = []
+
+    for particle in selected:
+        item = dict(particle)
+
+        pdg = item.get("pdg")
+
+        if pdg is None:
+            raise RuntimeError(
+                "Cannot determine the DM candidate because the selected particle "
+                f"{particle_display_name(item)} has no PDG code."
+            )
+
+        pdg_key = abs(int(pdg))
+
+        if param_card is not None:
+            if pdg_key not in card_masses:
+                raise RuntimeError(
+                    "The selected parameter card does not contain a MASS entry for:\n"
+                    f"  {particle_display_name(item)} (PDG {int(pdg)})\n\n"
+                    f"Parameter card:\n  {param_card}\n\n"
+                    "The card may not correspond to the active UFO/variant."
+                )
+
+            mass_value = float(card_masses[pdg_key])
+            mass_source = str(param_card)
+        else:
+            mass_value = resolve_ufo_reference(
+                item.get("mass"),
+                parameter_values,
+            )
+            mass_source = "UFO parameters.py"
+
+        if mass_value is None or not math.isfinite(mass_value):
+            raise RuntimeError(
+                "Could not determine a numerical mass for:\n"
+                f"  {particle_display_name(item)}\n"
+                f"Mass reference: {item.get('mass')}"
+            )
+
+        if param_card is not None and pdg_key in card_widths:
+            width_value = float(card_widths[pdg_key])
+            width_source = str(param_card)
+        else:
+            width_value = resolve_ufo_reference(
+                item.get("width"),
+                parameter_values,
+            )
+            width_source = "UFO parameters.py"
+
+        if width_value is not None and not math.isfinite(width_value):
+            width_value = None
+
+        item["resolved_mass"] = mass_value
+        item["resolved_width"] = width_value
+        item["mass_source"] = mass_source
+        item["width_source"] = width_source
+
+        resolved.append(item)
+
+    return resolved
 
 
 # ============================================================
@@ -562,6 +879,23 @@ def format_number(value):
     return str(value)
 
 
+def format_charge(value):
+    if value is None:
+        return "-"
+
+    value = float(value)
+
+    if math.isclose(value, round(value), abs_tol=CHARGE_TOLERANCE):
+        return str(int(round(value)))
+
+    three_q = 3.0 * value
+
+    if math.isclose(three_q, round(three_q), abs_tol=CHARGE_TOLERANCE):
+        return f"{int(round(three_q))}/3"
+
+    return f"{value:g}"
+
+
 def particle_display_name(species):
     if species["name"] == species["antiname"]:
         return species["name"]
@@ -572,17 +906,22 @@ def particle_display_name(species):
     )
 
 
-def print_particle_table(species):
+def print_particle_table(species, title="Available BSM particle species:"):
     print()
-    print("Available physical particle species:")
+    print(title)
     print()
+
+    if not species:
+        print("  (none)")
+        print()
+        return
 
     name_width = max(
         20,
         max(
             len(particle_display_name(particle))
             for particle in species
-        ) + 2
+        ) + 2,
     )
 
     header = (
@@ -598,19 +937,9 @@ def print_particle_table(species):
     print("-" * len(header))
 
     for particle in species:
-
         display_name = particle_display_name(particle)
-
         pdg = format_number(particle["pdg"])
-
-        ###
-        charge = particle["charge"]
-        if float(charge) % 1 != 0:
-            charge_ui = str(int(3*float(charge))) +  "/3"
-        else:
-            charge_ui = charge
-            
-        ###
+        charge = format_charge(particle["charge"])
         spin = ufo_spin_to_physical(particle["spin"])
         mass = particle["mass"] or "-"
         dof = (
@@ -618,11 +947,11 @@ def print_particle_table(species):
             if particle["dof"] is not None
             else "?"
         )
-        
+
         print(
             f"{display_name:<{name_width}}"
             f"{pdg:>12}"
-            f"{charge_ui:>10}"
+            f"{charge:>10}"
             f"{spin:>10}"
             f"{mass:>15}"
             f"{dof:>8}"
@@ -630,83 +959,101 @@ def print_particle_table(species):
 
     print()
 
-# ============================================================
-# User selection
-# ============================================================
 
-def parse_selection(text, species):
-    """
-    Select physical particle species using either:
+def print_detected_odd_sector(selected):
+    print()
+    print("=" * 70)
+    print("Z2-odd particles automatically detected from UFO '~' markers")
+    print("=" * 70)
+    print()
 
-      - UFO/MadGraph particle names
-      - PDG codes
-
-    Examples:
-
-        N1 N2 N3 etp etI etR
-        1012 1014 1016 1003 1002 1001
-        N1, N2, 1003, etI
-
-    For a particle-antiparticle species, either the particle or
-    antiparticle name/PDG selects the same physical species.
-    """
-
-    tokens = text.replace(",", " ").split()
-
-    if not tokens:
-        raise ValueError(
-            "No particles were selected."
+    for particle in selected:
+        print(
+            f"  - {particle_display_name(particle):<24} "
+            f"PDG={format_number(particle['pdg']):<8} "
+            f"mass={particle['mass'] or '-':<12} "
+            f"dof={particle['dof']}"
         )
 
+    print()
+
+
+# ============================================================
+# User selection and validation
+# ============================================================
+
+def build_particle_lookups(species):
     by_name = {}
     by_pdg = {}
 
     for particle in species:
-
         name = particle["name"]
         antiname = particle["antiname"]
         pdg = particle["pdg"]
 
-        # Accept both particle and antiparticle MadGraph names.
         by_name[name] = particle
         by_name[antiname] = particle
 
-        # Accept both signs of the PDG for a
-        # particle-antiparticle species.
         if pdg is not None:
             pdg = int(pdg)
-
             by_pdg[pdg] = particle
 
             if name != antiname:
                 by_pdg[-pdg] = particle
 
+    return by_name, by_pdg
+
+
+def parse_selection(text, selectable_species, all_species):
+    """
+    Select BSM physical species using UFO/MadGraph names or PDG codes.
+
+    Standard-Model particles are resolved explicitly so that accidental SM
+    input produces a dedicated error rather than a generic 'unknown particle'.
+    """
+    tokens = text.replace(",", " ").split()
+
+    if not tokens:
+        raise ValueError("No particles were selected.")
+
+    all_by_name, all_by_pdg = build_particle_lookups(all_species)
+    bsm_by_name, bsm_by_pdg = build_particle_lookups(selectable_species)
+
     selected = []
     seen = set()
 
     for token in tokens:
+        try:
+            pdg_token = int(token)
+        except ValueError:
+            pdg_token = None
 
-        particle = by_name.get(token)
+        all_particle = (
+            all_by_pdg.get(pdg_token)
+            if pdg_token is not None
+            else all_by_name.get(token)
+        )
 
-        if particle is None:
-            try:
-                pdg = int(token)
-            except ValueError:
-                pdg = None
+        if all_particle is not None and is_standard_model_species(all_particle):
+            raise ValueError(
+                f"{particle_display_name(all_particle)} "
+                f"(PDG {format_number(all_particle['pdg'])}) belongs to the "
+                "Standard Model and cannot be included in odd_particles.txt."
+            )
 
-            if pdg is not None:
-                particle = by_pdg.get(pdg)
+        particle = (
+            bsm_by_pdg.get(pdg_token)
+            if pdg_token is not None
+            else bsm_by_name.get(token)
+        )
 
         if particle is None:
             raise ValueError(
-                f"Unknown particle: {token}. "
-                "Enter a UFO/MadGraph particle name or a PDG code "
-                "shown in the table."
+                f"Unknown or non-BSM particle: {token}. "
+                "Enter a UFO/MadGraph BSM particle name or a PDG code shown "
+                "in the table."
             )
 
-        # One row in odd_particles.txt corresponds to one
-        # physical species, so particle/antiparticle inputs
-        # must not create duplicates.
         key = (
             particle["name"],
             particle["antiname"],
@@ -718,11 +1065,8 @@ def parse_selection(text, species):
 
     return selected
 
+
 def validate_selected_dof(selected):
-    """
-    Reject a selected dark-sector particle if its spin is not
-    covered by the current DOF rules.
-    """
     unsupported = [
         particle
         for particle in selected
@@ -742,25 +1086,26 @@ def validate_selected_dof(selected):
         "The DOF could not be calculated for the following "
         "selected particle(s):\n"
         f"{names}\n\n"
-        "The current rules support physical spins "
-        "0, 1/2 and 1."
+        "The current rules support physical spins 0, 1/2 and 1."
     )
 
-def ask_selection(species):
+
+def ask_selection(selectable_species, all_species):
     while True:
-        print(
-            "Select all Z2-odd particles of the dark sector."
-        )
+        print_particle_table(selectable_species)
+        print("Select all Z2-odd particles of the dark sector.")
         print()
         print(
             "Enter UFO/MadGraph particle names or PDG codes "
             "separated by spaces or commas."
         )
         print()
+        print("Standard-Model particles are not allowed.")
+        print()
         print("Examples:")
         print("  N1 N2 N3 etp etI etR")
         print("  1012 1014 1016 1003 1002 1001")
-        print("  N1, N2, 1003, etI, etR")
+        print("  ~N1, ~N2, 1003")
         print()
 
         answer = input("> ").strip()
@@ -768,17 +1113,18 @@ def ask_selection(species):
         try:
             selected = parse_selection(
                 answer,
-                species,
+                selectable_species,
+                all_species,
             )
 
             validate_selected_dof(selected)
-
             return selected
 
         except ValueError as exc:
             print()
             print(f"Error: {exc}")
             print()
+
 
 def confirm_selection(selected):
     print()
@@ -788,7 +1134,6 @@ def confirm_selection(selected):
     print()
 
     for particle in selected:
-
         name = particle_display_name(particle)
         spin = ufo_spin_to_physical(particle["spin"])
         mass = particle["mass"] or "-"
@@ -796,6 +1141,7 @@ def confirm_selection(selected):
 
         print(
             f"  - {name}"
+            f"    PDG={format_number(particle['pdg'])}"
             f"    mass={mass}"
             f"    spin={spin}"
             f"    dof={dof}"
@@ -805,7 +1151,7 @@ def confirm_selection(selected):
 
     while True:
         answer = input(
-            "Is this selection correct? [y/n]: "
+            "Is this odd-sector selection correct? [y/n]: "
         ).strip().lower()
 
         if answer in ("y", "yes"):
@@ -816,6 +1162,284 @@ def confirm_selection(selected):
 
         print("Please enter y or n.")
 
+
+def manual_selection_loop(selectable_species, all_species):
+    while True:
+        selected = ask_selection(
+            selectable_species,
+            all_species,
+        )
+
+        if confirm_selection(selected):
+            return selected
+
+        print()
+        print("Selection cancelled.")
+        print("Please select the particles again.")
+
+
+def yes_no(prompt, default=True):
+    suffix = " [Y/n]: " if default else " [y/N]: "
+
+    while True:
+        answer = input(prompt + suffix).strip().lower()
+
+        if not answer:
+            return default
+
+        if answer in ("y", "yes"):
+            return True
+
+        if answer in ("n", "no"):
+            return False
+
+        print("Please enter y or n.")
+
+
+# ============================================================
+# DM-candidate determination
+# ============================================================
+
+def candidate_validation_reasons(particle):
+    reasons = []
+
+    mass = particle.get("resolved_mass")
+    charge = particle.get("charge")
+    width = particle.get("resolved_width")
+
+    if mass is None or not math.isfinite(mass) or mass <= 0.0:
+        reasons.append("its mass is not positive and finite")
+
+    if charge is None:
+        reasons.append("its electric charge could not be determined from the UFO")
+    elif abs(float(charge)) > CHARGE_TOLERANCE:
+        reasons.append(
+            f"it is electrically charged (Q={format_charge(charge)})"
+        )
+
+    if width is None:
+        reasons.append(
+            "its decay width could not be determined, so stability cannot be verified"
+        )
+    elif abs(float(width)) > STABILITY_WIDTH_TOLERANCE:
+        reasons.append(
+            f"it has a non-zero decay width (Gamma={width:.8e} GeV)"
+        )
+
+    return reasons
+
+
+def group_by_mass(sorted_particles):
+    groups = []
+
+    for particle in sorted_particles:
+        mass = particle["resolved_mass"]
+
+        if not groups:
+            groups.append([particle])
+            continue
+
+        reference_mass = groups[-1][0]["resolved_mass"]
+
+        if math.isclose(
+            mass,
+            reference_mass,
+            rel_tol=MASS_DEGENERACY_RTOL,
+            abs_tol=MASS_DEGENERACY_ATOL,
+        ):
+            groups[-1].append(particle)
+        else:
+            groups.append([particle])
+
+    return groups
+
+
+def choose_degenerate_candidate(valid_particles):
+    print()
+    print("Several neutral and stable Z2-odd particles share the lowest mass:")
+    print()
+
+    for index, particle in enumerate(valid_particles, start=1):
+        print(
+            f"  {index}. {particle_display_name(particle):<24} "
+            f"PDG={format_number(particle['pdg']):<8} "
+            f"mass={particle['resolved_mass']:.8e} GeV"
+        )
+
+    print()
+
+    while True:
+        answer = input("Select the dark-matter candidate: ").strip()
+
+        try:
+            index = int(answer)
+        except ValueError:
+            index = 0
+
+        if 1 <= index <= len(valid_particles):
+            return valid_particles[index - 1]
+
+        print("Please enter one of the listed numbers.")
+
+
+def ask_invalid_candidate_action(has_next):
+    print()
+    print("Choose an action:")
+
+    if has_next:
+        print("  1. Test the next-lightest odd particle")
+
+    print("  2. Redefine the odd sector manually")
+    print("  3. Cancel")
+    print()
+
+    valid_choices = {"2", "3"}
+    if has_next:
+        valid_choices.add("1")
+
+    while True:
+        answer = input("> ").strip()
+
+        if answer in valid_choices:
+            return answer
+
+        print("Please select one of the available options.")
+
+
+def choose_dm_candidate(resolved_selected):
+    sorted_particles = sorted(
+        resolved_selected,
+        key=lambda particle: particle["resolved_mass"],
+    )
+
+    mass_groups = group_by_mass(sorted_particles)
+
+    for group_index, group in enumerate(mass_groups):
+        valid_particles = [
+            particle
+            for particle in group
+            if not candidate_validation_reasons(particle)
+        ]
+
+        invalid_particles = [
+            particle
+            for particle in group
+            if candidate_validation_reasons(particle)
+        ]
+
+        if valid_particles:
+            if invalid_particles:
+                print()
+                print(
+                    "Some particles at the lowest currently tested mass cannot "
+                    "be DM candidates:"
+                )
+                for particle in invalid_particles:
+                    reasons = "; ".join(candidate_validation_reasons(particle))
+                    print(
+                        f"  - {particle_display_name(particle)}: {reasons}."
+                    )
+
+            if len(valid_particles) == 1:
+                candidate = valid_particles[0]
+            else:
+                candidate = choose_degenerate_candidate(valid_particles)
+
+            print()
+            print("Dark-matter candidate identified:")
+            print(f"  Particle : {particle_display_name(candidate)}")
+            print(f"  PDG      : {format_number(candidate['pdg'])}")
+            print(f"  Mass     : {candidate['resolved_mass']:.8e} GeV")
+            print(f"  Charge   : {format_charge(candidate['charge'])}")
+            print(f"  Width    : {candidate['resolved_width']:.8e} GeV")
+            print(f"  Mass src : {candidate['mass_source']}")
+            print(f"  Width src: {candidate['width_source']}")
+
+            return candidate
+
+        print()
+        print("=" * 70)
+        print("The lightest currently tested Z2-odd state(s) cannot be DM")
+        print("=" * 70)
+        print()
+
+        for particle in group:
+            reasons = candidate_validation_reasons(particle)
+            print(
+                f"  {particle_display_name(particle)} "
+                f"(PDG {format_number(particle['pdg'])}, "
+                f"mass={particle['resolved_mass']:.8e} GeV)"
+            )
+            for reason in reasons:
+                print(f"    - {reason}")
+
+        has_next = group_index + 1 < len(mass_groups)
+        action = ask_invalid_candidate_action(has_next)
+
+        if action == "1":
+            continue
+
+        if action == "2":
+            return None
+
+        raise KeyboardInterrupt
+
+    return None
+
+
+def print_final_configuration(selected, candidate, param_card):
+    print()
+    print("=" * 78)
+    print("Final dark-sector configuration")
+    print("=" * 78)
+    print()
+    print("Dark-matter candidate:")
+    print(f"  Particle : {particle_display_name(candidate)}")
+    print(f"  PDG      : {format_number(candidate['pdg'])}")
+    print(f"  Mass     : {candidate['resolved_mass']:.8e} GeV")
+    print(f"  Charge   : {format_charge(candidate['charge'])}")
+    print(f"  Width    : {candidate['resolved_width']:.8e} GeV")
+    print()
+
+    if param_card is not None:
+        print("Mass/width configuration:")
+        print(f"  Parameter card: {param_card}")
+    else:
+        print("Mass/width configuration:")
+        print("  UFO default values from parameters.py")
+
+    print()
+    print("Z2-odd sector:")
+    print()
+
+    for particle in selected:
+        marker = "  <DM>" if (
+            particle["name"] == candidate["name"]
+            and int(particle["pdg"]) == int(candidate["pdg"])
+        ) else ""
+
+        print(
+            f"  - {particle_display_name(particle):<24} "
+            f"PDG={format_number(particle['pdg']):<8} "
+            f"mass={particle['resolved_mass']:.8e} GeV"
+            f"{marker}"
+        )
+
+    print()
+
+
+def confirm_final_configuration(selected, candidate, param_card):
+    print_final_configuration(selected, candidate, param_card)
+
+    return yes_no(
+        "Write this configuration to odd_particles.txt?",
+        default=True,
+    )
+
+
+# ============================================================
+# odd_particles.txt
+# ============================================================
 
 def confirm_overwrite(path):
     if not path.exists():
@@ -826,35 +1450,20 @@ def confirm_overwrite(path):
     print(f"  {path}")
     print()
 
-    while True:
-        answer = input(
-            "Overwrite it? [y/n]: "
-        ).strip().lower()
-
-        if answer in ("y", "yes"):
-            return True
-
-        if answer in ("n", "no"):
-            return False
-
-        print("Please enter y or n.")
+    return yes_no("Overwrite it?", default=False)
 
 
-# ============================================================
-# Write odd_particles.txt
-# ============================================================
-
-def write_odd_particles(output_file, selected):
+def write_odd_particles(output_file, selected, dm_candidate):
     """
     Output format:
 
+        # DM candidate: N1    PDG: 1012
         # particle    antiparticle    mass    dof
-        n1            n1              MN1     2
-        et+           et-             Metp    2
+          N1          N1              MN1     2
+          etp         etpc            Metp    2
 
-    Each line represents ONE physical species.
-
-    Therefore particle-antiparticle pairs are NOT duplicated.
+    The metadata line is a comment so existing consumers that ignore '#'
+    comments remain compatible with the file.
     """
     rows = []
 
@@ -869,22 +1478,27 @@ def write_odd_particles(output_file, selected):
     particle_width = max(
         12,
         len("particle"),
-        max(len(str(row[0])) for row in rows) + 2
+        max(len(str(row[0])) for row in rows) + 2,
     )
 
     antiparticle_width = max(
         16,
         len("antiparticle"),
-        max(len(str(row[1])) for row in rows) + 2
+        max(len(str(row[1])) for row in rows) + 2,
     )
 
     mass_width = max(
         10,
         len("mass"),
-        max(len(str(row[2])) for row in rows) + 2
+        max(len(str(row[2])) for row in rows) + 2,
     )
 
-    lines = []
+    lines = [
+        (
+            f"# DM candidate: {dm_candidate['name']}    "
+            f"PDG: {int(dm_candidate['pdg'])}"
+        )
+    ]
 
     lines.append(
         f"# "
@@ -905,19 +1519,15 @@ def write_odd_particles(output_file, selected):
 
     output_file.write_text(
         "\n".join(lines) + "\n",
-        encoding="utf-8"
+        encoding="utf-8",
     )
+
 
 # ============================================================
 # MadGraph template configuration
 # ============================================================
 
 def get_madgraph_directory(build_dir):
-    """
-    Read MADGRAPH_DIR from the CMake cache generated during:
-
-        cmake .. -DMADGRAPH_DIR=/path/to/MadGraph
-    """
     cache_file = build_dir / "CMakeCache.txt"
 
     if not cache_file.is_file():
@@ -929,9 +1539,8 @@ def get_madgraph_directory(build_dir):
 
     for line in cache_file.read_text(
         encoding="utf-8",
-        errors="replace"
+        errors="replace",
     ).splitlines():
-
         if line.startswith("MADGRAPH_DIR:"):
             _, value = line.split("=", 1)
 
@@ -954,13 +1563,6 @@ def get_madgraph_directory(build_dir):
 
 
 def find_modify_template_script(build_dir):
-    """
-    Locate modify_template.sh.
-
-    The build-tree copy is preferred. Source-tree locations are
-    kept as fallbacks so UI1 can also be tested directly from
-    the repository.
-    """
     repo_dir = build_dir.parent
 
     candidates = [
@@ -987,21 +1589,14 @@ def find_modify_template_script(build_dir):
 
 def run_modify_template(input_dir, odd_particles_file):
     """
-    Run:
+    Preserve the current UI1 contract:
 
         modify_template.sh <template_files_dir> <odd_particles.txt>
-
-    MADGRAPH_DIR is obtained automatically from CMakeCache.txt.
     """
     build_dir = input_dir.parent.resolve()
 
-    madgraph_dir = get_madgraph_directory(
-        build_dir
-    )
-
-    modify_script = find_modify_template_script(
-        build_dir
-    )
+    madgraph_dir = get_madgraph_directory(build_dir)
+    modify_script = find_modify_template_script(build_dir)
 
     template_dir = (
         madgraph_dir
@@ -1042,7 +1637,6 @@ def run_modify_template(input_dir, odd_particles_file):
             ],
             check=True,
         )
-
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
             "modify_template.sh failed "
@@ -1052,19 +1646,12 @@ def run_modify_template(input_dir, odd_particles_file):
     print()
     print("MadGraph templates configured successfully.")
 
+
 # ============================================================
 # Program
 # ============================================================
 
 def resolve_variant(cli_variant):
-    """
-    Resolve which variant to use.
-
-    Priority:
-        1. --variant on the command line
-        2. $VARIANT from the environment
-        3. error
-    """
     if cli_variant:
         return cli_variant
 
@@ -1084,9 +1671,8 @@ def resolve_variant(cli_variant):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Configure the Z2-odd dark-sector particles "
-            "of an ExtraDM UFO model stored in a specific "
-            "variant inside input/."
+            "Configure the Z2-odd BSM sector and determine the dark-matter "
+            "candidate of an ExtraDM UFO model stored in a specific variant."
         )
     )
 
@@ -1111,32 +1697,36 @@ def main():
     args = parser.parse_args()
 
     variant_name = resolve_variant(args.variant)
+    input_dir = find_input_directory(args.input_dir)
+    variant_dir = find_variant_directory(input_dir, variant_name)
+    ufo_dir = find_ufo_directory(variant_dir)
 
-    input_dir = find_input_directory(
-        args.input_dir
-    )
+    particles_file = ufo_dir / "particles.py"
+    parameters_file = ufo_dir / "parameters.py"
 
-    variant_dir = find_variant_directory(
-        input_dir,
-        variant_name,
-    )
+    particles = read_ufo_particles(particles_file)
+    all_species = build_particle_species(particles)
 
-    ufo_dir = find_ufo_directory(
-        variant_dir
-    )
+    bsm_species = [
+        particle
+        for particle in all_species
+        if not is_standard_model_species(particle)
+    ]
 
-    particles_file = (
-        ufo_dir
-        / "particles.py"
-    )
+    if not bsm_species:
+        raise RuntimeError(
+            "No physical BSM particle species were found after excluding "
+            "Standard-Model particles."
+        )
 
-    particles = read_ufo_particles(
-        particles_file
-    )
+    parameter_values = read_ufo_parameter_values(parameters_file)
+    param_card = choose_variant_param_card(variant_dir)
 
-    species = build_particle_species(
-        particles
-    )
+    card_masses = {}
+    card_widths = {}
+
+    if param_card is not None:
+        card_masses, card_widths = read_param_card_mass_widths(param_card)
 
     print()
     print("=" * 70)
@@ -1148,31 +1738,101 @@ def main():
     print(f"Variant path    : {variant_dir}")
     print(f"UFO model       : {ufo_dir.name}")
     print(f"Particles file  : {particles_file}")
-    print(f"Particle species: {len(species)}")
+    print(f"Physical species: {len(all_species)}")
+    print(f"BSM species     : {len(bsm_species)}")
+    print(
+        "Mass source     : "
+        + (str(param_card) if param_card is not None else "UFO parameters.py")
+    )
+
+    print()
+    print("Press Ctrl+C at any time to exit.")
+
+    automatically_detected = [
+        particle
+        for particle in bsm_species
+        if has_odd_marker(particle)
+    ]
+
+    allow_automatic_proposal = bool(automatically_detected)
 
     while True:
-        print_particle_table(species)
+        if allow_automatic_proposal:
+            try:
+                validate_selected_dof(automatically_detected)
+            except ValueError as exc:
+                print()
+                print("Automatic '~' detection cannot be used:")
+                print(exc)
+                print()
+                selected = manual_selection_loop(
+                    bsm_species,
+                    all_species,
+                )
+                allow_automatic_proposal = False
+            else:
+                print_detected_odd_sector(automatically_detected)
 
-        print(
-            "Press Ctrl+C at any time to exit."
+                use_detected = yes_no(
+                    "Use these automatically detected particles as the odd sector?",
+                    default=True,
+                )
+
+                if use_detected:
+                    selected = list(automatically_detected)
+                else:
+                    print()
+                    print("Switching to manual odd-sector selection.")
+                    selected = manual_selection_loop(
+                        bsm_species,
+                        all_species,
+                    )
+                    allow_automatic_proposal = False
+        else:
+            if not automatically_detected:
+                print()
+                print(
+                    "No '~' Z2-odd markers were found in BSM particle names "
+                    "from particles.py."
+                )
+                print("The odd sector must be selected manually.")
+
+            selected = manual_selection_loop(
+                bsm_species,
+                all_species,
+            )
+            allow_automatic_proposal = False
+
+        resolved_selected = resolve_selected_properties(
+            selected=selected,
+            parameter_values=parameter_values,
+            param_card=param_card,
+            card_masses=card_masses,
+            card_widths=card_widths,
         )
-        print()
 
-        selected = ask_selection(species)
+        dm_candidate = choose_dm_candidate(resolved_selected)
 
-        if confirm_selection(selected):
+        if dm_candidate is None:
+            print()
+            print("Returning to manual odd-sector selection.")
+            allow_automatic_proposal = False
+            continue
+
+        if confirm_final_configuration(
+            resolved_selected,
+            dm_candidate,
+            param_card,
+        ):
+            selected = resolved_selected
             break
 
         print()
-        print("Selection cancelled.")
-        print(
-            "Please select the particles again."
-        )
+        print("Final configuration was not accepted.")
+        print("Returning to manual odd-sector selection.")
+        allow_automatic_proposal = False
 
-    output_file = (
-        variant_dir
-        / "odd_particles.txt"
-    )
+    output_file = variant_dir / "odd_particles.txt"
 
     if not confirm_overwrite(output_file):
         print()
@@ -1181,12 +1841,13 @@ def main():
 
     write_odd_particles(
         output_file,
-        selected
+        selected,
+        dm_candidate,
     )
 
     run_modify_template(
         input_dir,
-        output_file
+        output_file,
     )
 
     print()
@@ -1197,14 +1858,27 @@ def main():
     print("File:")
     print(f"  {output_file}")
     print()
-    print("Selected dark-sector species:")
+    print("Dark-matter candidate:")
+    print(
+        f"  {particle_display_name(dm_candidate)} "
+        f"(PDG {format_number(dm_candidate['pdg'])})"
+    )
+    print()
+    print("Selected Z2-odd dark-sector species:")
     print()
 
     for particle in selected:
+        marker = "  <DM>" if (
+            particle["name"] == dm_candidate["name"]
+            and int(particle["pdg"]) == int(dm_candidate["pdg"])
+        ) else ""
+
         print(
-            f"  {particle_display_name(particle):<20} "
-            f"mass={particle['mass'] or '-':<12} "
+            f"  {particle_display_name(particle):<24} "
+            f"PDG={format_number(particle['pdg']):<8} "
+            f"mass={particle['resolved_mass']:.8e} GeV "
             f"dof={particle['dof']}"
+            f"{marker}"
         )
 
     print()
@@ -1235,3 +1909,4 @@ except OSError as exc:
     print(exc)
     print()
     sys.exit(1)
+
