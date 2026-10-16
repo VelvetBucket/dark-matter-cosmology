@@ -116,7 +116,7 @@ for i in "${!odd_particles[@]}"; do
 
     odd_cpp_block+="    // ${particle} / ${antiparticle}"$'\n'
     odd_cpp_block+="    newMasses.push_back(${mass_cpp});"$'\n'
-    odd_cpp_block+="    newDOF[${mass_cpp}] = ${dof};"$'\n'
+    odd_cpp_block+="    newDOF.push_back({${mass_cpp}, ${dof}});"$'\n'
 done
 
 odd_cpp_block+=$'    // END AUTO ODD PARTICLES\n'
@@ -231,7 +231,7 @@ grep -Fq 'virtual double sigmaKin(double s, double theta);' \
     "$template_dir/cpp_process_class.inc" || is_modified=false
 grep -Fq 'getNewMasses() const {return newMasses;}' \
     "$template_dir/cpp_process_class.inc" || is_modified=false
-grep -Fq 'std::unordered_map<double, double> newDOF;' \
+grep -Fq 'vector < std::pair < double, double >> newDOF;' \
     "$template_dir/cpp_process_class.inc" || is_modified=false
 
 # 6. cpp_process_function_definitions.inc
@@ -261,7 +261,7 @@ for i in "${!odd_particles[@]}"; do
         "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
     grep -Fq "newMasses.push_back(${mass_cpp});" \
         "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
-    grep -Fq "newDOF[${mass_cpp}] = ${odd_dofs[$i]};" \
+    grep -Fq "newDOF.push_back({${mass_cpp}, ${dof}});" \
         "$template_dir/cpp_process_function_definitions.inc" || is_modified=false
 done
 
@@ -484,14 +484,14 @@ fi
 
 if ! replace_block "$template_dir/cpp_process_class.inc" \
     $'  virtual int    code()    const {return %(process_code)s;}\n\n  const vector<double>& getMasses() const {return mME;}\n\n  // Get and set momenta for matrix element evaluation\n  vector<double*> getMomenta(){return p;}\n  void setMomenta(vector<double*>& momenta){p = momenta;}\n' \
-    $'  virtual int    code()    const {return %(process_code)s;}\n\n  const vector<double>& getMasses() const {return mME;}\n  const vector<double>& getNewMasses() const {return newMasses;}\n  const std::unordered_map<double, double> & getNewDOF() const {return newDOF;}\n  \n  // Get and set momenta for matrix element evaluation\n  vector<double*> getMomenta(){return p;}\n  void setMomenta(vector<double*>& momenta){p = momenta;}\n'
+    $'  virtual int    code()    const {return %(process_code)s;}\n\n  const vector<double>& getMasses() const {return mME;}\n  const vector<double>& getNewMasses() const {return newMasses;}\n  const vector < std::pair < double, double >> & getNewDOF() const {return newDOF;}\n  \n  // Get and set momenta for matrix element evaluation\n  vector<double*> getMomenta(){return p;}\n  void setMomenta(vector<double*>& momenta){p = momenta;}\n'
 then
     fail_modification
 fi
 
 if ! replace_block "$template_dir/cpp_process_class.inc" \
     $'\n  // Pointer to the model parameters\n  Parameters_%(model_name)s* pars;\n\n  // vector with external particle masses\n  vector<double> mME;\n\n' \
-    $'\n  // Pointer to the model parameters\n  Parameters_%(model_name)s* pars;\n  \n  // vector with masses of new particles\n  vector<double> newMasses;\n  \n  // dictionary with dof of new particles\n  std::unordered_map<double, double> newDOF;\n  \n  // vector with external particle masses\n  vector<double> mME;\n\n'
+    $'\n  // Pointer to the model parameters\n  Parameters_%(model_name)s* pars;\n  \n  // vector with masses of new particles\n  vector<double> newMasses;\n  \n  // dictionary with dof of new particles\n  vector < std::pair < double, double >> newDOF;\n  \n  // vector with external particle masses\n  vector<double> mME;\n\n'
 then
     fail_modification
 fi
