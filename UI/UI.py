@@ -1019,8 +1019,17 @@ def write_reports(
     records: list[ProcessRecord],
     unparsed: list[str],
     settings: dict,
+    report_tag: Optional[str] = None,
 ) -> tuple[Path, Path]:
-    report_base = output_dir.parent / f"{output_dir.name}_selection"
+    # Batch mode preserves an independent selector report for each physics point.
+    # Single-card mode retains the historical filenames and JSON schema.
+    suffix = ""
+    if report_tag is not None:
+        safe_tag = re.sub(r"[^a-zA-Z0-9_-]", "_", report_tag)
+        if not safe_tag:
+            raise ValueError("A nonempty report tag is required in batch mode.")
+        suffix = f"__{safe_tag}"
+    report_base = output_dir.parent / f"{output_dir.name}_selection{suffix}"
     json_path = report_base.with_suffix(".json")
     csv_path = report_base.with_suffix(".csv")
 
@@ -2285,37 +2294,41 @@ def infer_mg5_output(subprocesses_dir: Path, explicit_value: Optional[object]) -
 def run_kerrigan(
     kerrigan: Path,
     build_dir: Path,
-    param_card: Path,
+    param_card: Path | str,
     task: str,
     mode: str,
     candidate: Particle,
     selector_regex: str,
-    selection_report: Path,
+    selection_report: Optional[Path],
     mg5_output: Optional[Path],
     physics_output_root: Optional[Path],
     verbose: bool,
+    cards_dir: Optional[Path] = None,
 ) -> None:
-    """Delegate both relic and sigmaV tasks to the CMake-configured Kerrigan."""
+    """Invoke Kerrigan once for a physics point or for a compatible card batch.
+
+    Kerrigan already compiles each subprocess only once, then loops through
+    cards. A batch uses --cards-dir + a literal glob, but no single-card UI2
+    report, because Kerrigan intentionally binds such reports to one card.
+    """
     if not kerrigan.is_file():
         raise FileNotFoundError(f"CMake-generated Kerrigan script does not exist: {kerrigan}")
 
+    card_spec = str(param_card.resolve()) if isinstance(param_card, Path) else str(param_card)
     command = [
         "bash",
         str(kerrigan),
-        str(param_card.resolve()),
-        "--task",
-        task,
-        "--mode",
-        mode,
-        "--candidate",
-        candidate.name,
-        "--candidate-pdg",
-        str(candidate.pdg),
-        "--selection-report",
-        str(selection_report.resolve()),
-        "--process-selector",
-        selector_regex,
+        "--param-card", card_spec,
+        "--task", task,
+        "--mode", mode,
+        "--candidate", candidate.name,
+        "--candidate-pdg", str(candidate.pdg),
+        "--process-selector", selector_regex,
     ]
+    if selection_report is not None:
+        command.extend(["--selection-report", str(selection_report.resolve())])
+    if cards_dir is not None:
+        command.extend(["--cards-dir", str(cards_dir.resolve())])
 
     if mg5_output is not None:
         command.extend(["--mg5-output", str(mg5_output.resolve())])
@@ -2329,7 +2342,11 @@ def run_kerrigan(
     environment["KERRIGAN_MODE"] = mode
     environment["KERRIGAN_CANDIDATE"] = candidate.name
     environment["KERRIGAN_CANDIDATE_PDG"] = str(candidate.pdg)
-    environment["KERRIGAN_SELECTION_REPORT"] = str(selection_report.resolve())
+    if selection_report is None:
+        # Do not inherit an unrelated single-card report from a previous run.
+        environment.pop("KERRIGAN_SELECTION_REPORT", None)
+    else:
+        environment["KERRIGAN_SELECTION_REPORT"] = str(selection_report.resolve())
 
     working_dir = (build_dir if build_dir.is_dir() else kerrigan.parent).resolve()
 
@@ -2337,7 +2354,9 @@ def run_kerrigan(
         print("\nStarting calculation using CMake-generated Kerrigan")
         print(f"Kerrigan runtime   : {kerrigan}")
         print(f"CMake build        : {build_dir}")
-        print(f"Card               : {param_card}")
+        print(f"Card specification : {card_spec}")
+        if cards_dir is not None:
+            print(f"Cards directory    : {cards_dir}")
         print(f"Task               : {task}")
         if task == "sigmav":
             print("Pipeline            : sigmaV only (relic-density branch disabled)")
@@ -2367,6 +2386,372 @@ def run_kerrigan(
 
     print("\nExternal calculation completed successfully.")
     print(f"Working directory used by Kerrigan/run_madgraph: {working_dir}")
+
+@dataclass
+class CardBatchPlan:
+    """Fully checked, read-only physics selection for one parameter card."""
+    card: Path
+    candidate: Particle
+    dark_particles: list[Particle]
+    active_pdgs: set[int]
+    decisions: list[DarkSectorDecision]
+    records: list[ProcessRecord]
+    unparsed: list[str]
+    manual_pdgs: list[int]
+    warnings: list[str]
+    selected_names: frozenset[str]
+
+
+def analyze_batch_card(
+    card: Path,
+    ui1_sector: Optional[UI1OddSector],
+    subprocesses_dir: Path,
+    mode: str,
+    requested_dark_pdgs: Optional[set[int]],
+    candidate_config: Optional[object],
+    manual_pdgs: list[int],
+    partner_pdgs: list[int],
+    xf: float,
+    max_delta: float,
+    min_relative_weight: float,
+    width_tolerance: float,
+    allow_unstable: bool,
+    allow_nonlightest: bool,
+) -> CardBatchPlan:
+    """Apply UI2's normal per-card physics rules before changing any files."""
+    read_particles = read_param_card(card)
+    aliases = None if ui1_sector is None else ui1_sector.aliases_by_pdg
+    dofs = None if ui1_sector is None else ui1_sector.dof_by_pdg
+    charges = None if ui1_sector is None else ui1_sector.charges_by_pdg
+
+    if ui1_sector is not None:
+        if requested_dark_pdgs is not None and requested_dark_pdgs != ui1_sector.dark_pdgs:
+            raise ValueError("UI1_SYNC: --dark-pdgs conflicts with UI1 odd_particles.txt")
+        missing = sorted(set(ui1_sector.dark_pdgs) - {p.pdg for p in read_particles})
+        if missing:
+            raise ValueError(f"UI1_SYNC: odd-sector PDGs missing in {card.name}: {missing}")
+        dark_particles = get_dark_particles(read_particles, set(ui1_sector.dark_pdgs))
+    else:
+        dark_particles = get_dark_particles(read_particles, requested_dark_pdgs)
+
+    ui1_candidate = None
+    if ui1_sector is not None and ui1_sector.candidate_pdg is not None:
+        ui1_candidate = particle_by_pdg(read_particles, ui1_sector.candidate_pdg)
+        if candidate_config is not None:
+            custom = resolve_candidate(str(candidate_config), read_particles)
+            if custom.pdg != ui1_candidate.pdg:
+                raise ValueError(f"UI1_SYNC: --candidate conflicts with UI1 in {card.name}")
+
+    selected_manual = list(manual_pdgs)
+    if mode == "pdg":
+        if partner_pdgs:
+            if ui1_candidate is None:
+                raise ValueError("--coannihilators requires the UI1 DM-candidate header")
+            selected_manual = [ui1_candidate.pdg] + unique_pdgs(partner_pdgs)
+        elif not selected_manual:
+            if ui1_candidate is None:
+                raise ValueError(f"PDG mode needs --pdgs or UI1 candidate metadata for {card.name}")
+            selected_manual = [ui1_candidate.pdg]
+        selected_manual = unique_pdgs(selected_manual)
+        candidate = particle_by_pdg(read_particles, selected_manual[0])
+        if ui1_candidate is not None and candidate.pdg != ui1_candidate.pdg:
+            raise ValueError(f"UI1_SYNC: first --pdgs value conflicts with UI1 for {card.name}")
+        if candidate_config is not None and resolve_candidate(str(candidate_config), read_particles).pdg != candidate.pdg:
+            raise ValueError(f"--candidate conflicts with --pdgs for {card.name}")
+        if ui1_sector is not None and not set(selected_manual).issubset(ui1_sector.dark_pdgs):
+            raise ValueError(f"UI1_SYNC: requested coannihilators are outside UI1 sector for {card.name}")
+    else:
+        if ui1_candidate is not None:
+            candidate = ui1_candidate
+        elif candidate_config is not None:
+            candidate = resolve_candidate(str(candidate_config), read_particles)
+        else:
+            raise ValueError(f"No UI1 candidate header; provide --candidate for card {card.name}")
+
+    if ui1_sector is not None and candidate.pdg not in ui1_sector.dark_pdgs:
+        raise ValueError(f"UI1_SYNC: candidate is absent from odd-sector in {card.name}")
+    warnings = validate_candidate(
+        candidate=candidate,
+        dark_particles=dark_particles,
+        allow_unstable=allow_unstable,
+        allow_nonlightest=allow_nonlightest,
+        width_tolerance=width_tolerance,
+        aliases_by_pdg=aliases,
+        charges_by_pdg=charges,
+    )
+
+    if mode == "combined":
+        active_pdgs, decisions = build_effective_dark_sector(
+            candidate, dark_particles, xf, max_delta, min_relative_weight,
+            dof_by_pdg=dofs,
+        )
+        records, unparsed = scan_processes(
+            subprocesses_dir, dark_particles, candidate, active_pdgs,
+            mode="combined", aliases_by_pdg=aliases,
+        )
+    else:
+        records, unparsed, manual_decisions, mode_warnings = scan_processes_pdg(
+            subprocesses_dir, dark_particles, candidate, selected_manual,
+            aliases_by_pdg=aliases,
+        )
+        active_pdgs = {candidate.pdg} | {
+            dec.pdg for dec in manual_decisions if dec.included
+        }
+        decisions = build_manual_report_decisions(
+            candidate, dark_particles,
+            [candidate.pdg] + [dec.pdg for dec in manual_decisions if dec.included],
+            xf,
+        )
+        warnings.extend(mode_warnings)
+
+    selected = frozenset(rec.directory for rec in records if rec.selected)
+    if not selected:
+        raise ValueError(f"Card {card.name}: no SubProcesses were selected")
+    if not any(rec.selected and rec.category == "candidate_only" for rec in records):
+        warnings.append("No candidate-candidate annihilation channel was selected")
+    return CardBatchPlan(
+        card, candidate, dark_particles, active_pdgs, decisions, records,
+        unparsed, selected_manual, warnings, selected,
+    )
+
+
+def resolve_batch_cards(cards_dir: Path, card_glob: Optional[str]) -> tuple[list[Path], str]:
+    if not cards_dir.is_dir():
+        raise FileNotFoundError(f"Parameter-card directory does not exist: {cards_dir}")
+    if card_glob is None:
+        pattern = "param_card*.dat" if list(cards_dir.glob("param_card*.dat")) else "*.dat"
+    else:
+        pattern = card_glob.strip()
+    if not pattern or any(part in pattern for part in ("/", "\\", "..")):
+        raise ValueError("--card-glob must be a filename pattern within --cards-dir")
+    cards = sorted(
+        (card.resolve() for card in cards_dir.glob(pattern) if card.is_file() and card.suffix.lower() == ".dat"),
+        key=lambda path: path.name,
+    )
+    if not cards:
+        raise ValueError(f"No .dat parameter cards matched {pattern!r} in {cards_dir}")
+    # Kerrigan uses find -name pattern, which must match the exact same set.
+    if sorted(cards_dir.glob(pattern)) != sorted([card for card in cards_dir.glob(pattern) if card.is_file() and card.suffix.lower() == ".dat"]):
+        raise ValueError("--card-glob matched non-card files/directories; narrow the pattern")
+    return cards, pattern
+
+
+def run_card_batch(
+    args: argparse.Namespace,
+    file_config: dict[str, object],
+    config_dir: Optional[Path],
+    layout: RuntimeLayout,
+    cards_dir: Optional[Path],
+    mode: str,
+    manual_pdgs: list[int],
+    partner_pdgs: list[int],
+    xf: float,
+    max_delta: float,
+    min_relative_weight: float,
+    width_tolerance: float,
+    task: str,
+    verbose: bool,
+    backup: bool,
+) -> int:
+    """Preflight all cards, then compile once/process if selections coincide."""
+    if cards_dir is None:
+        raise ValueError("Batch mode requires a model cards directory or --cards-dir")
+    cards, pattern = resolve_batch_cards(cards_dir, args.card_glob)
+    if not layout.subprocesses_dir.is_dir():
+        raise FileNotFoundError(f"SubProcesses directory does not exist: {layout.subprocesses_dir}")
+
+    subprocesses_dir = resolve_runtime_path(
+        config_value(args.subprocesses, file_config, "subprocesses", None),
+        layout.subprocesses_dir,
+    )
+    if layout.strict_model_binding:
+        expected = layout.mg5_output or layout.model_root
+        if not _is_within(subprocesses_dir, expected):
+            raise ValueError(f"MODEL_SUBPROCESSES_MISMATCH: {subprocesses_dir} is outside {expected}")
+    if not subprocesses_dir.is_dir():
+        raise FileNotFoundError(f"SubProcesses directory does not exist: {subprocesses_dir}")
+
+    output_dir = resolve_runtime_path(
+        config_value(args.output, file_config, "output", None), layout.output_dir,
+    )
+    backup_root = resolve_runtime_path(
+        config_value(args.backup_dir, file_config, "backup_dir", None), layout.backup_root,
+    )
+    build_value = config_value(args.build_dir, file_config, "build_dir", layout.build_dir)
+    kerrigan, build_dir = resolve_cmake_kerrigan(
+        script_root=layout.model_root,
+        explicit_kerrigan=config_value(args.kerrigan, file_config, "kerrigan", None),
+        build_dir_value=build_value,
+        config_dir=config_dir,
+    )
+    mg5_output = infer_mg5_output(
+        subprocesses_dir, config_value(args.mg5_output, file_config, "mg5_output", None),
+    )
+    if layout.mg5_output is not None and mg5_output != layout.mg5_output:
+        raise ValueError("MODEL_MG5_MISMATCH: selected model and MG5 output do not match")
+    if mg5_output is not None and subprocesses_dir.resolve() != (mg5_output / "SubProcesses").resolve():
+        raise ValueError("MODEL_MG5_MISMATCH: SubProcesses differs from MG5 output")
+
+    phys_value = config_value(args.physics_output_root, file_config, "physics_output_root", None)
+    physics_root = None if phys_value is None else Path(str(phys_value)).expanduser().resolve()
+    odd_value = config_value(args.odd_file, file_config, "odd_file", None)
+    odd_file = Path(str(odd_value)).expanduser().resolve() if odd_value is not None else None
+    if odd_file is not None and layout.strict_model_binding and not _is_within(odd_file, layout.model_root):
+        raise ValueError("UI1_SYNC: --odd-file cannot point outside the selected model root")
+    ui1_sector = read_ui1_odd_sector(layout, odd_file)
+    if ui1_sector is not None and len(cards) > 1:
+        print("NOTE: UI1 does not record its reference param_card. Each card will be independently "
+              "validated against the selected DM candidate before any calculation.")
+
+    requested_dark_pdgs = parse_dark_pdgs(
+        config_value(args.dark_pdgs, file_config, "dark_pdgs", None)
+    )
+    candidate_config = config_value(args.candidate, file_config, "candidate", None)
+
+    plans: list[CardBatchPlan] = []
+    problems: list[str] = []
+    for card in cards:
+        try:
+            plan = analyze_batch_card(
+                card, ui1_sector, subprocesses_dir, mode,
+                requested_dark_pdgs, candidate_config, manual_pdgs, partner_pdgs,
+                xf, max_delta, min_relative_weight, width_tolerance,
+                args.allow_unstable_candidate, args.allow_nonlightest_candidate,
+            )
+            plans.append(plan)
+        except (FileNotFoundError, ValueError) as exc:
+            problems.append(f"  - {card.name}: {exc}")
+    if problems:
+        raise ValueError("Batch preflight failed; no physics outputs were changed:\n" + "\n".join(problems))
+
+    signatures = {plan.selected_names for plan in plans}
+    combined_batch = len(signatures) == 1
+    print("\nUI2 multi-card preflight")
+    print(f"  Model             : {layout.model_label}")
+    print(f"  Cards directory   : {cards_dir}")
+    print(f"  Matched cards     : {len(plans)} ({pattern})")
+    print(f"  DM candidate      : PDG {plans[0].candidate.pdg} (from UI1 if available)")
+    print(f"  Unique selections : {len(signatures)}")
+    print(f"  Execution plan    : {'one Kerrigan run (compile once per process)' if combined_batch else 'separate Kerrigan runs (different per-card processes)'}")
+    for plan in plans:
+        print(f"    {plan.card.name}: {len(plan.selected_names)} processes")
+        if verbose:
+            for warning in plan.warnings:
+                print(f"      WARNING: {warning}")
+    if not combined_batch:
+        print("WARNING: Thermal/manual process sets differ across cards. UI2 will NOT sum "
+              "extra processes into a card's TOTALS_T; each card runs with its own selector.")
+    if args.dry_run:
+        print("Dry run complete: no copies, compilation, or calculations.")
+        return 0
+    if verbose and not args.yes and not yes_no(f"Execute sigma-v for all {len(plans)} cards?", default=False):
+        print("Operation cancelled; no physics output was changed.")
+        return 0
+
+    base_settings = {
+        "model": layout.model_label,
+        "model_root": str(layout.model_root),
+        "ui1_odd_particles": None if ui1_sector is None else str(ui1_sector.source),
+        "ui1_dm_candidate_pdg": None if ui1_sector is None else ui1_sector.candidate_pdg,
+        "ui1_dof_by_pdg": {} if ui1_sector is None else {
+            str(k): v for k,v in ui1_sector.dof_by_pdg.items()
+        },
+        "ufo_source": None if ui1_sector is None else str(ui1_sector.ufo_directory),
+        "strict_model_binding": layout.strict_model_binding,
+        "selection_stage": "thermal_preselection_before_sigmav" if mode == "combined" else "manual_pdg_selection",
+        "sigmav_filter_applied": False,
+        "xf": xf, "x_ref": xf, "max_delta": max_delta,
+        "min_relative_weight": min_relative_weight,
+        "width_tolerance": width_tolerance,
+        "task": task, "verbose": verbose, "backup": backup,
+        "cards_dir": str(cards_dir), "cmake_build_dir": str(build_dir),
+        "kerrigan_runtime": str(kerrigan),
+        "mg5_output": None if mg5_output is None else str(mg5_output),
+        "physics_output_root": None if physics_root is None else str(physics_root),
+        "batch_card_count": len(plans), "batch_common_selection": combined_batch,
+    }
+
+    def install_and_report(plan: CardBatchPlan, create_selection: bool) -> Optional[Path]:
+        if create_selection:
+            copy_selected_processes_v2(
+                subprocesses_dir, output_dir, plan.records,
+                backup=backup, backup_root=backup_root, verbose=verbose,
+            )
+        settings = dict(base_settings)
+        settings.update({
+            "dark_pdgs": [p.pdg for p in plan.dark_particles],
+            "manual_pdgs": plan.manual_pdgs if mode == "pdg" else [],
+            "batch_card": str(plan.card),
+        })
+        # Include suffix for each card, so a later batch card cannot overwrite
+        # the prior card's JSON/CSV selections.
+        tag = plan.card.stem
+        json_path, csv_path = write_reports(
+            output_dir, plan.card, plan.candidate, mode, plan.active_pdgs,
+            plan.decisions, plan.records, plan.unparsed, settings, report_tag=tag,
+        )
+        if verbose:
+            print(f"  Report {plan.card.name}: {json_path} | {csv_path}")
+        return json_path
+
+    if combined_batch:
+        # Kerrigan already performs `for process -> compile -> for card -> run`.
+        # Save each card's selection AND one group-level selector report without
+        # a single-card `param_card` field. Kerrigan accepts this group report,
+        # checks the selected process names, and copies it into every output.
+        individual_reports: list[dict[str, str]] = []
+        for index, plan in enumerate(plans):
+            report = install_and_report(plan, create_selection=(index == 0))
+            individual_reports.append({"card": str(plan.card), "report": str(report)})
+        batch_json = output_dir.parent / (
+            f"{output_dir.name}_selection__batch_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
+        )
+        batch_json.write_text(json.dumps({
+            "mode": mode,
+            "candidate": asdict(plans[0].candidate),
+            "settings": base_settings,
+            "param_cards": [str(plan.card) for plan in plans],
+            "per_card_reports": individual_reports,
+            "selected_count": len(plans[0].selected_names),
+            "selected_processes": [
+                asdict(rec) for rec in plans[0].records if rec.selected
+            ],
+            "batch_common_selection": True,
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"  Shared batch report: {batch_json}")
+        run_kerrigan(
+            kerrigan=kerrigan,
+            build_dir=build_dir,
+            param_card=pattern,
+            cards_dir=cards_dir,
+            task=task, mode=mode, candidate=plans[0].candidate,
+            selector_regex=bash_regex_for_selected_processes(plans[0].records),
+            selection_report=batch_json,
+            mg5_output=mg5_output,
+            physics_output_root=physics_root,
+            verbose=verbose,
+        )
+    else:
+        # A different combined-mode selection changes the physical sum. Do NOT
+        # run the union across all cards. This fallback preserves accuracy.
+        for i, plan in enumerate(plans, 1):
+            print(f"\n[{i}/{len(plans)}] Independent selection: {plan.card.name}")
+            report = install_and_report(plan, create_selection=True)
+            run_kerrigan(
+                kerrigan=kerrigan,
+                build_dir=build_dir,
+                param_card=plan.card,
+                task=task, mode=mode, candidate=plan.candidate,
+                selector_regex=bash_regex_for_selected_processes(plan.records),
+                selection_report=report,
+                mg5_output=mg5_output,
+                physics_output_root=physics_root,
+                verbose=verbose,
+            )
+    print(f"\nCompleted sigma-v for {len(plans)} parameter cards.")
+    return 0
+
 
 def build_parser() -> argparse.ArgumentParser:
     script_root = Path(__file__).resolve().parent
@@ -2422,7 +2807,28 @@ def build_parser() -> argparse.ArgumentParser:
         dest="cards_dir",
         type=Path,
         default=None,
-        help="Advanced override: parameter-card directory (default: <build>/input/<variant>/cards).",
+        help=(
+            "Parameter-card directory. Without a single-card argument, "
+            "process ALL matching cards using Kerrigan's process-first loop. "
+            "Default directory: <build>/input/<variant>/cards."
+        ),
+    )
+
+    parser.add_argument(
+        "--all-cards",
+        action="store_true",
+        help=(
+            "Process every parameter card in the model's default cards directory. "
+            "--cards-dir DIR also enables batch mode when no individual card is supplied."
+        ),
+    )
+    parser.add_argument(
+        "--card-glob",
+        default=None,
+        help=(
+            "Advanced batch filter (e.g. 'scan_*.dat'). Default: 'param_card*.dat' "
+            "when those exist, otherwise '*.dat'. Requires batch mode."
+        ),
     )
 
     parser.add_argument(
@@ -2724,6 +3130,23 @@ def main() -> int:
     param_card_value: Optional[object] = args.param_card
     if param_card_value is None:
         param_card_value = file_config.get("param_card")
+
+    # Preserve the existing one-card workflow when a specific card is supplied.
+    # An explicit cards directory with no card now requests all cards, as does
+    # --all-cards with CMake's default model directory.
+    explicit_batch_dir = args.cards_dir is not None or "cards_dir" in file_config
+    batch_requested = args.all_cards or (explicit_batch_dir and param_card_value is None) or args.card_glob is not None
+    if args.all_cards and param_card_value is not None:
+        raise ValueError("--all-cards cannot be combined with an individual param_card")
+    if batch_requested and param_card_value is not None:
+        raise ValueError("--card-glob/batch selection cannot be combined with a single param_card")
+    if batch_requested:
+        return run_card_batch(
+            args, file_config, config_dir, layout, cards_dir,
+            mode, manual_pdgs, partner_pdgs, xf, max_delta,
+            min_relative_weight, width_tolerance, task, verbose, backup,
+        )
+
     param_card = resolve_ui2_param_card(
         requested=param_card_value,
         layout=layout,
