@@ -4,6 +4,7 @@ import argparse
 import ast
 import math
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1523,6 +1524,374 @@ def write_odd_particles(output_file, selected, dm_candidate):
     )
 
 
+
+# ============================================================
+# Batch parameter-card processing
+# ============================================================
+
+def choose_dm_candidate_batch(resolved_selected):
+    """
+    Determine the DM candidate non-interactively for one parameter point.
+
+    Particles are tested in ascending mass order. Charged, unstable, or
+    otherwise unverifiable states are skipped. The first mass level that
+    contains at least one neutral, stable state supplies the candidate.
+
+    If several valid particles are mass-degenerate, choose deterministically
+    by |PDG| and then name. The ambiguity is recorded for the final summary.
+    """
+    sorted_particles = sorted(
+        resolved_selected,
+        key=lambda particle: (
+            particle["resolved_mass"],
+            abs(int(particle["pdg"])),
+            str(particle["name"]),
+        ),
+    )
+
+    rejected = []
+
+    for group in group_by_mass(sorted_particles):
+        valid = []
+        invalid = []
+
+        for particle in group:
+            reasons = candidate_validation_reasons(particle)
+
+            if reasons:
+                invalid.append({
+                    "particle": particle,
+                    "reasons": reasons,
+                })
+            else:
+                valid.append(particle)
+
+        rejected.extend(invalid)
+
+        if not valid:
+            continue
+
+        valid = sorted(
+            valid,
+            key=lambda particle: (
+                abs(int(particle["pdg"])),
+                str(particle["name"]),
+            ),
+        )
+
+        candidate = valid[0]
+
+        return candidate, {
+            "rejected_before_or_at_candidate": rejected,
+            "degenerate_valid_candidates": valid,
+            "used_degenerate_tiebreak": len(valid) > 1,
+        }
+
+    return None, {
+        "rejected_before_or_at_candidate": rejected,
+        "degenerate_valid_candidates": [],
+        "used_degenerate_tiebreak": False,
+    }
+
+
+def safe_filename_component(value):
+    value = str(value)
+    cleaned = "".join(
+        character
+        if character.isalnum() or character in ("-", "_", ".")
+        else "_"
+        for character in value
+    )
+
+    cleaned = cleaned.strip("._")
+    return cleaned or "card"
+
+
+def odd_output_name_for_card(param_card, variant_dir, used_names):
+    """
+    Build a deterministic filename without writing the param-card identity
+    inside odd_particles itself.
+
+    Example:
+        cards/param_card_001.dat
+          -> odd_particles_param_card_001.txt
+    """
+    relative = param_card.resolve().relative_to(variant_dir.resolve())
+    relative_without_suffix = relative.with_suffix("")
+    parts = list(relative_without_suffix.parts)
+
+    if parts and parts[0] in PARAM_CARD_DIR_NAMES:
+        parts = parts[1:]
+
+    if not parts:
+        parts = [param_card.stem]
+
+    token = "__".join(
+        safe_filename_component(part)
+        for part in parts
+    )
+
+    base_name = f"odd_particles_{token}.txt"
+    name = base_name
+    counter = 2
+
+    while name in used_names:
+        name = f"odd_particles_{token}__{counter}.txt"
+        counter += 1
+
+    used_names.add(name)
+    return name
+
+
+def prepare_batch_output_directory(output_dir, legacy_file):
+    existing_items = []
+
+    if output_dir.exists():
+        existing_items.append(output_dir)
+
+    if legacy_file.exists():
+        existing_items.append(legacy_file)
+
+    if existing_items:
+        print()
+        print("Existing odd-sector output from a previous run was found:")
+        for item in existing_items:
+            print(f"  - {item}")
+        print()
+        print(
+            "The new multi-card layout requires regenerating these outputs "
+            "to avoid mixing old and new DM-candidate information."
+        )
+
+        if not yes_no("Replace the existing odd-sector output?", default=False):
+            return False
+
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+
+    if legacy_file.exists():
+        legacy_file.unlink()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return True
+
+
+def print_batch_plan(param_cards, output_dir):
+    print()
+    print("=" * 78)
+    print("DM-candidate determination plan")
+    print("=" * 78)
+
+    if param_cards:
+        print(f"Parameter cards : {len(param_cards)}")
+        print("Mode            : batch (all cards in the active variant)")
+    else:
+        print("Parameter cards : 0")
+        print("Mode            : UFO default parameters.py")
+
+    print(f"Output directory: {output_dir}")
+    print()
+    print(
+        "The confirmed odd sector will be reused for every parameter point. "
+        "For each card, UI1 will choose the lightest neutral and stable odd "
+        "state as the DM candidate."
+    )
+    print()
+
+
+def process_parameter_cards_batch(
+    selected,
+    parameter_values,
+    param_cards,
+    variant_dir,
+    output_dir,
+):
+    """
+    Generate one odd-particle file per parameter card.
+
+    No param-card metadata is written inside the files. Each file contains only
+    the DM-candidate comment plus the usual odd-sector table.
+    """
+    jobs = list(param_cards) if param_cards else [None]
+    used_names = set()
+    generated = []
+    failed = []
+    candidate_counts = {}
+    skipped_invalid_count = 0
+    degenerate_tiebreak_count = 0
+
+    total = len(jobs)
+
+    for index, param_card in enumerate(jobs, start=1):
+        label = (
+            "UFO defaults"
+            if param_card is None
+            else str(param_card.relative_to(variant_dir))
+        )
+
+        if total > 1:
+            print(
+                f"\rProcessing parameter cards: {index}/{total}",
+                end="",
+                flush=True,
+            )
+
+        try:
+            card_masses = {}
+            card_widths = {}
+
+            if param_card is not None:
+                card_masses, card_widths = read_param_card_mass_widths(
+                    param_card
+                )
+
+            resolved_selected = resolve_selected_properties(
+                selected=selected,
+                parameter_values=parameter_values,
+                param_card=param_card,
+                card_masses=card_masses,
+                card_widths=card_widths,
+            )
+
+            dm_candidate, candidate_info = choose_dm_candidate_batch(
+                resolved_selected
+            )
+
+            if dm_candidate is None:
+                reasons = []
+
+                for rejected in candidate_info[
+                    "rejected_before_or_at_candidate"
+                ]:
+                    particle = rejected["particle"]
+                    reason_text = "; ".join(rejected["reasons"])
+                    reasons.append(
+                        f"{particle_display_name(particle)}: {reason_text}"
+                    )
+
+                failed.append({
+                    "label": label,
+                    "reason": (
+                        "No neutral and stable odd particle could be identified. "
+                        + " | ".join(reasons)
+                    ),
+                })
+                continue
+
+            rejected = candidate_info[
+                "rejected_before_or_at_candidate"
+            ]
+
+            if rejected:
+                skipped_invalid_count += 1
+
+            if candidate_info["used_degenerate_tiebreak"]:
+                degenerate_tiebreak_count += 1
+
+            if param_card is None:
+                output_name = "odd_particles_default.txt"
+                used_names.add(output_name)
+            else:
+                output_name = odd_output_name_for_card(
+                    param_card,
+                    variant_dir,
+                    used_names,
+                )
+
+            output_file = output_dir / output_name
+
+            write_odd_particles(
+                output_file,
+                resolved_selected,
+                dm_candidate,
+            )
+
+            pdg = int(dm_candidate["pdg"])
+            candidate_key = (
+                dm_candidate["name"],
+                pdg,
+            )
+            candidate_counts[candidate_key] = (
+                candidate_counts.get(candidate_key, 0) + 1
+            )
+
+            generated.append({
+                "param_card": param_card,
+                "label": label,
+                "output_file": output_file,
+                "candidate": dm_candidate,
+                "candidate_info": candidate_info,
+            })
+
+        except (RuntimeError, OSError, ValueError) as exc:
+            failed.append({
+                "label": label,
+                "reason": str(exc),
+            })
+
+    if total > 1:
+        print()
+
+    return {
+        "generated": generated,
+        "failed": failed,
+        "candidate_counts": candidate_counts,
+        "skipped_invalid_count": skipped_invalid_count,
+        "degenerate_tiebreak_count": degenerate_tiebreak_count,
+        "total": total,
+    }
+
+
+def print_batch_summary(summary, output_dir):
+    generated = summary["generated"]
+    failed = summary["failed"]
+
+    print()
+    print("=" * 78)
+    print("UI1 batch summary")
+    print("=" * 78)
+    print(f"Parameter points processed : {summary['total']}")
+    print(f"odd_particles files written: {len(generated)}")
+    print(f"Failed parameter points     : {len(failed)}")
+    print(
+        "Points where lighter/equal invalid odd states were skipped: "
+        f"{summary['skipped_invalid_count']}"
+    )
+    print(
+        "Degenerate valid-candidate tie-breaks                   : "
+        f"{summary['degenerate_tiebreak_count']}"
+    )
+    print(f"Output directory            : {output_dir}")
+
+    if summary["candidate_counts"]:
+        print()
+        print("DM candidates:")
+
+        for (name, pdg), count in sorted(
+            summary["candidate_counts"].items(),
+            key=lambda item: (-item[1], abs(item[0][1]), item[0][0]),
+        ):
+            print(
+                f"  {name:<20} PDG={pdg:<8} : {count} point(s)"
+            )
+
+    if failed:
+        print()
+        print("Failed parameter points (showing at most 20):")
+
+        for item in failed[:20]:
+            compact_reason = " ".join(item["reason"].split())
+            if len(compact_reason) > 180:
+                compact_reason = compact_reason[:177] + "..."
+
+            print(f"  - {item['label']}: {compact_reason}")
+
+        if len(failed) > 20:
+            print(f"  ... and {len(failed) - 20} more failure(s).")
+
+    print("=" * 78)
+    print()
+
 # ============================================================
 # MadGraph template configuration
 # ============================================================
@@ -1672,7 +2041,7 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Configure the Z2-odd BSM sector and determine the dark-matter "
-            "candidate of an ExtraDM UFO model stored in a specific variant."
+            "candidate for every parameter card of an ExtraDM UFO variant."
         )
     )
 
@@ -1720,13 +2089,7 @@ def main():
         )
 
     parameter_values = read_ufo_parameter_values(parameters_file)
-    param_card = choose_variant_param_card(variant_dir)
-
-    card_masses = {}
-    card_widths = {}
-
-    if param_card is not None:
-        card_masses, card_widths = read_param_card_mass_widths(param_card)
+    param_cards = find_variant_param_cards(variant_dir)
 
     print()
     print("=" * 70)
@@ -1740,10 +2103,14 @@ def main():
     print(f"Particles file  : {particles_file}")
     print(f"Physical species: {len(all_species)}")
     print(f"BSM species     : {len(bsm_species)}")
-    print(
-        "Mass source     : "
-        + (str(param_card) if param_card is not None else "UFO parameters.py")
-    )
+    print(f"Parameter cards : {len(param_cards)}")
+
+    if not param_cards:
+        print("Mass/width source: UFO default values from parameters.py")
+    else:
+        print(
+            "Mass/width source: every parameter card inside the active variant"
+        )
 
     print()
     print("Press Ctrl+C at any time to exit.")
@@ -1754,100 +2121,114 @@ def main():
         if has_odd_marker(particle)
     ]
 
-    allow_automatic_proposal = bool(automatically_detected)
+    selected = None
 
-    while True:
-        if allow_automatic_proposal:
-            try:
-                validate_selected_dof(automatically_detected)
-            except ValueError as exc:
-                print()
-                print("Automatic '~' detection cannot be used:")
-                print(exc)
-                print()
-                selected = manual_selection_loop(
-                    bsm_species,
-                    all_species,
-                )
-                allow_automatic_proposal = False
-            else:
-                print_detected_odd_sector(automatically_detected)
-
-                use_detected = yes_no(
-                    "Use these automatically detected particles as the odd sector?",
-                    default=True,
-                )
-
-                if use_detected:
-                    selected = list(automatically_detected)
-                else:
-                    print()
-                    print("Switching to manual odd-sector selection.")
-                    selected = manual_selection_loop(
-                        bsm_species,
-                        all_species,
-                    )
-                    allow_automatic_proposal = False
+    if automatically_detected:
+        try:
+            validate_selected_dof(automatically_detected)
+        except ValueError as exc:
+            print()
+            print("Automatic '~' detection cannot be used:")
+            print(exc)
+            print()
         else:
-            if not automatically_detected:
-                print()
-                print(
-                    "No '~' Z2-odd markers were found in BSM particle names "
-                    "from particles.py."
-                )
-                print("The odd sector must be selected manually.")
+            print_detected_odd_sector(automatically_detected)
 
-            selected = manual_selection_loop(
-                bsm_species,
-                all_species,
+            if yes_no(
+                "Use these automatically detected particles as the odd sector?",
+                default=True,
+            ):
+                selected = list(automatically_detected)
+
+    if selected is None:
+        if not automatically_detected:
+            print()
+            print(
+                "No '~' Z2-odd markers were found in BSM particle names "
+                "from particles.py."
             )
-            allow_automatic_proposal = False
 
-        resolved_selected = resolve_selected_properties(
-            selected=selected,
-            parameter_values=parameter_values,
-            param_card=param_card,
-            card_masses=card_masses,
-            card_widths=card_widths,
+        print()
+        print("The odd sector will be selected manually.")
+
+        selected = manual_selection_loop(
+            bsm_species,
+            all_species,
         )
 
-        dm_candidate = choose_dm_candidate(resolved_selected)
+    # The automatic path was already confirmed by the yes/no question above.
+    # The manual path is confirmed inside manual_selection_loop().
+    validate_selected_dof(selected)
 
-        if dm_candidate is None:
-            print()
-            print("Returning to manual odd-sector selection.")
-            allow_automatic_proposal = False
-            continue
+    output_dir = variant_dir / "odd_particles"
+    legacy_file = variant_dir / "odd_particles.txt"
 
-        if confirm_final_configuration(
-            resolved_selected,
-            dm_candidate,
-            param_card,
-        ):
-            selected = resolved_selected
-            break
-
-        print()
-        print("Final configuration was not accepted.")
-        print("Returning to manual odd-sector selection.")
-        allow_automatic_proposal = False
-
-    output_file = variant_dir / "odd_particles.txt"
-
-    if not confirm_overwrite(output_file):
-        print()
-        print("No file was written.")
-        return
-
-    write_odd_particles(
-        output_file,
-        selected,
-        dm_candidate,
+    print_batch_plan(
+        param_cards,
+        output_dir,
     )
 
+    if not yes_no(
+        "Generate the odd-particle configuration files for all parameter points?",
+        default=True,
+    ):
+        print()
+        print("No files were written.")
+        return
+
+    if not prepare_batch_output_directory(
+        output_dir,
+        legacy_file,
+    ):
+        print()
+        print("No files were written.")
+        return
+
+    summary = process_parameter_cards_batch(
+        selected=selected,
+        parameter_values=parameter_values,
+        param_cards=param_cards,
+        variant_dir=variant_dir,
+        output_dir=output_dir,
+    )
+
+    print_batch_summary(
+        summary,
+        output_dir,
+    )
+
+    generated = summary["generated"]
+
+    if not generated:
+        raise RuntimeError(
+            "No odd_particles file could be generated because no valid "
+            "neutral and stable DM candidate was found for any parameter point."
+        )
+
+    # Keep one legacy/root-level odd_particles.txt for consumers such as
+    # run_madgraph.py, which still expect:
+    #
+    #     <variant>/odd_particles.txt
+    #
+    # All per-param-card files share the same odd-sector table, so the first
+    # successfully generated configuration is sufficient for MadGraph.
+    representative_file = generated[0]["output_file"]
+
+    shutil.copy2(
+        representative_file,
+        legacy_file,
+    )
+
+    print()
+    print("Representative odd-particle file for MadGraph:")
+    print(f"  {legacy_file}")
+    print(f"  copied from: {representative_file}")
+
+    # modify_template.sh only needs the odd-sector table. Use the same
+    # root-level compatibility copy consumed by run_madgraph.py.
     run_modify_template(
         input_dir,
-        output_file,
+        legacy_file,
     )
 
     print()
@@ -1855,32 +2236,20 @@ def main():
     print("Configuration generated successfully")
     print("=" * 70)
     print()
-    print("File:")
-    print(f"  {output_file}")
-    print()
-    print("Dark-matter candidate:")
-    print(
-        f"  {particle_display_name(dm_candidate)} "
-        f"(PDG {format_number(dm_candidate['pdg'])})"
-    )
-    print()
-    print("Selected Z2-odd dark-sector species:")
+    print("Confirmed Z2-odd dark-sector species:")
     print()
 
     for particle in selected:
-        marker = "  <DM>" if (
-            particle["name"] == dm_candidate["name"]
-            and int(particle["pdg"]) == int(dm_candidate["pdg"])
-        ) else ""
-
         print(
             f"  {particle_display_name(particle):<24} "
             f"PDG={format_number(particle['pdg']):<8} "
-            f"mass={particle['resolved_mass']:.8e} GeV "
+            f"mass={particle['mass'] or '-':<12} "
             f"dof={particle['dof']}"
-            f"{marker}"
         )
 
+    print()
+    print("Generated odd-particle configurations:")
+    print(f"  {output_dir}")
     print()
 
 
