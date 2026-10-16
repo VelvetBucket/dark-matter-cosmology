@@ -809,7 +809,7 @@ for card in "${cards[@]}"; do
     card_stem="${card_stem%.dat}"
     card_label="$(sanitize_label "$card_stem")"
 
-    out_dir="$OUTPUT_ROOT/${card_label}__${MODE_LABEL}__${CANDIDATE_LABEL}__${TASK_LABEL}__${RUN_STAMP}"
+    out_dir="$OUTPUT_ROOT/${MODEL_VARIANT}/runs/${card_label}__${MODE_LABEL}__${CANDIDATE_LABEL}__${TASK_LABEL}__${RUN_STAMP}"
 
     # RUN_STAMP normally makes collisions impossible, but keep a deterministic
     # fallback for filesystems with unusual clock resolution.
