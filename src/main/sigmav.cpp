@@ -213,13 +213,12 @@ int main(int argc, char** argv){
     if (vm.count("neq")) {
       
       const vector<std::pair<double, double>> newDOF = process.getNewDOF();
-      double N_neq = 10*N, h_neq = log(Tf/T0)/(N_neq-1);
       double mi, neq, k2_mi;
       
       cout << "# x (DM_candidate_mass/T) vs. n_equilibrium" << endl;
       
-      for(int n = 0; n < N_neq; n++){
-        un = ui + n*h_neq;
+      for(int n = 0; n < N; n++){
+        un = ui + n*h;
         Tn = std::exp(un);
         neq = 0.0;
         k2_mi = 0.0;
@@ -232,20 +231,19 @@ int main(int argc, char** argv){
           neq += mi_gi.second * pow(mi,2) * k2_mi;
         }
         neq *= Tn/(2.0*pow(M_PI,2)); 
-        cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << neq  << "\n";
+        cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << neq << "\n";
       }
       
     } else {
-    
+      
       cout << "# x (DM_candidate_mass/T) vs. sigma*v" << endl;
-      //cout << m1 << "\n";
+      
       for(int n = 0; n < N; n++){
         un = ui + n*h;
         Tn = std::exp(un);
         sigv_n = sigma_v(Tn);
         cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << sigv_n << "\n";
       }
-    
     }
   }
   
