@@ -16,7 +16,7 @@ shopt -s nullglob
 #       - for each selected SubProcess, copy CPPProcess.cc/.h;
 #       - rebuild bin/sigmav;
 #       - run sigmav for the selected parameter card(s);
-#       - optionally generate neq.dat;
+#       - leave neq.dat/relic-density work paused;
 #       - sum the individual sigmaV files into TOTALS_T.dat.
 #   * Never hard-code a user's absolute filesystem path.
 #   * Never overwrite a previous physics run.
@@ -111,6 +111,11 @@ SELECTION_REPORT="${KERRIGAN_SELECTION_REPORT:-}"
 PROCESS_SELECTOR="${KERRIGAN_PROCESS_SELECTOR:-}"
 OUTPUT_ROOT="${KERRIGAN_OUTPUT_ROOT:-$OUTPUT_ROOT_DEFAULT}"
 ALLOWED_PARTICLES_FILE="${KERRIGAN_ALLOWED_PARTICLES:-}"
+SIGMAV_PROFILE="history"
+X_FREEZEOUT="15"
+X_START_INPUT=""
+X_END_INPUT=""
+N_POINTS="1000"
 DRY_RUN=0
 
 usage() {
@@ -138,8 +143,12 @@ Options:
   --cards-dir DIR            Resolve bare card names/globs under this directory.
   --mg5-output NAME|PATH     Override the auto-detected MG5 standalone output.
   --variant NAME             Identify a model variant; also accepts --model.
-  --task relic|sigmav        sigmav (default): sigmaV + TOTALS_T.dat only.
-                            relic: existing legacy branch (not part of this fix).
+  --task sigmav             Sigma-v only. Relic density remains paused.
+  --sigmav-profile NAME     history (default) or freezeout.
+  --x-freezeout X           Reference x_FO for freezeout profile; default 15.
+  --x-start X               Custom initial x=mDM/T.
+  --x-end X                 Custom final x=mDM/T.
+  --n-points N              Number of x values; default 1000.
   --mode combined|pdg       Selection mode used by the UI; used in output names.
   --candidate VALUE         Candidate label/name used in output names.
   --candidate-pdg PDG       Candidate PDG, also included in the output name.
@@ -239,6 +248,21 @@ while [[ $# -gt 0 ]]; do
             ALLOWED_PARTICLES_FILE="$2"
             shift 2
             ;;
+        --sigmav-profile|--profile)
+            [[ $# -ge 2 ]] || { echo "ERROR: --sigmav-profile needs a value" >&2; exit 2; }
+            SIGMAV_PROFILE="$2"; shift 2 ;;
+        --x-freezeout)
+            [[ $# -ge 2 ]] || { echo "ERROR: --x-freezeout needs a value" >&2; exit 2; }
+            X_FREEZEOUT="$2"; shift 2 ;;
+        --x-start)
+            [[ $# -ge 2 ]] || { echo "ERROR: --x-start needs a value" >&2; exit 2; }
+            X_START_INPUT="$2"; shift 2 ;;
+        --x-end)
+            [[ $# -ge 2 ]] || { echo "ERROR: --x-end needs a value" >&2; exit 2; }
+            X_END_INPUT="$2"; shift 2 ;;
+        --n-points)
+            [[ $# -ge 2 ]] || { echo "ERROR: --n-points needs a value" >&2; exit 2; }
+            N_POINTS="$2"; shift 2 ;;
         --dry-run)
             DRY_RUN=1
             shift
@@ -277,13 +301,42 @@ case "${TASK_INPUT,,}" in
         TASK="sigmav"
         ;;
     relic|relic_density|relic-density|density)
-        TASK="relic"
+        echo "ERROR: Relic-density calculations are paused; choose --task sigmav." >&2
+        exit 2
         ;;
     *)
         echo "ERROR: task must be 'relic' or 'sigmav' (got '$TASK_INPUT')." >&2
         exit 2
         ;;
 esac
+
+# Validate numerical bounds before touching generated artifacts.
+mapfile -t GRID_SETTINGS < <(python3 - "$SIGMAV_PROFILE" "$X_FREEZEOUT" "$X_START_INPUT" "$X_END_INPUT" "$N_POINTS" <<'PY_GRID'
+import math, sys
+p, freeze, start, end, n = sys.argv[1:]
+try:
+    if p not in ('history', 'freezeout'):
+        raise ValueError('profile must be history or freezeout')
+    f = float(freeze)
+    if not math.isfinite(f) or f <= 0:
+        raise ValueError('x-freezeout must be finite and positive')
+    s = float(start) if start else (1e-10 if p == 'history' else f/10.)
+    e = float(end) if end else (1e7 if p == 'history' else f*10.)
+    n = int(n)
+    if not (math.isfinite(s) and math.isfinite(e) and 0 < s < e and 2 <= n <= 1000000):
+        raise ValueError('expected finite 0 < x-start < x-end and 2 <= n-points <= 1000000')
+    print(f'{s:.17g}')
+    print(f'{e:.17g}')
+    print(n)
+except (ValueError, OverflowError) as ex:
+    print(f'ERROR: Invalid sigma-v grid: {ex}', file=sys.stderr)
+    sys.exit(2)
+PY_GRID
+)
+[[ ${#GRID_SETTINGS[@]} -eq 3 ]] || { echo 'ERROR: Invalid sigma-v grid.' >&2; exit 2; }
+X_START="${GRID_SETTINGS[0]}"
+X_END="${GRID_SETTINGS[1]}"
+N_POINTS="${GRID_SETTINGS[2]}"
 
 OUTPUT_ROOT="$(python3 - "$OUTPUT_ROOT" <<'PY_PATH'
 from pathlib import Path
@@ -685,6 +738,10 @@ fi
 
 cards=()
 resolve_cards "$CARD_SPEC" cards
+if [[ -z "$CANDIDATE_PDG" || ! "$CANDIDATE_PDG" =~ ^[+-]?[0-9]+$ ]]; then
+    echo "ERROR: --candidate-pdg is required (or UI2 report must provide a candidate PDG)." >&2
+    exit 2
+fi
 
 # A UI2 report contains a *specific* validated card, not a wildcard. Do not
 # accidentally run the report's selected processes with another card.
@@ -786,6 +843,76 @@ if [[ ${#subprocess_folders[@]} -eq 0 ]]; then
     exit 1
 fi
 
+# The merged sigmav executable requires an explicit --mDM. Resolve it from
+# each card's Block MASS, never assume the same DM mass across a parameter scan.
+resolve_candidate_mass() {
+    local card="$1" pdg="$2"
+    python3 - "$card" "$pdg" <<'PY_MDM'
+import math, sys
+from pathlib import Path
+card, pdg = Path(sys.argv[1]), abs(int(sys.argv[2]))
+in_mass = False
+for raw in card.read_text(encoding='utf-8', errors='replace').splitlines():
+    body = raw.split('#', 1)[0].strip()
+    if not body:
+        continue
+    words = body.split()
+    if words[0].lower() == 'block':
+        in_mass = len(words) > 1 and words[1].lower() == 'mass'
+        continue
+    if words[0].lower() == 'decay':
+        in_mass = False
+        continue
+    if in_mass and len(words) >= 2:
+        try:
+            if abs(int(words[0])) == pdg:
+                mass = float(words[1].replace('D','E').replace('d','e'))
+                if not math.isfinite(mass) or mass <= 0:
+                    raise ValueError('mass must be finite and positive')
+                print(f'{mass:.17g}')
+                sys.exit(0)
+        except ValueError as e:
+            print(f'ERROR: Invalid mass record for PDG {pdg} in {card}: {e}', file=sys.stderr)
+            sys.exit(1)
+print(f'ERROR: PDG {pdg} is absent from Block MASS of {card}', file=sys.stderr)
+sys.exit(1)
+PY_MDM
+}
+
+# Keep sigma-v outputs as two numerical columns. The new C++ program prints a
+# nonnumeric 'Card: ...' line to stdout. Strip it, validate the grid, and
+# normalize x coordinates for reliable process-by-process totals.
+normalize_sigmav_table() {
+    local raw="$1" destination="$2"
+    python3 - "$raw" "$destination" "$X_START" "$X_END" "$N_POINTS" <<'PY_NORMALIZE'
+import math, sys
+from pathlib import Path
+raw, dest = Path(sys.argv[1]), Path(sys.argv[2])
+x0, xf, n = float(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5])
+rows = []
+for number, line in enumerate(raw.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
+    s = line.strip()
+    if not s or s.startswith('#') or s.startswith('Card:'):
+        continue
+    fields = s.split()
+    if len(fields) != 2:
+        raise ValueError(f'Unexpected sigma-v stdout at line {number}: {s[:100]}')
+    x, y = float(fields[0]), float(fields[1])
+    if not (math.isfinite(x) and math.isfinite(y)):
+        raise ValueError(f'Non-finite sigma-v values at line {number}')
+    rows.append((x,y))
+if len(rows) != n:
+    raise ValueError(f'Expected {n} sigma-v samples, got {len(rows)}')
+step = math.log(xf/x0)/(n-1)
+with dest.open('w', encoding='utf-8') as handle:
+    for index,(observed,y) in enumerate(rows):
+        expected = x0 * math.exp(index*step)
+        if not math.isclose(observed, expected, rel_tol=5e-6, abs_tol=1e-11*expected):
+            raise ValueError(f'Unexpected sigma-v x grid at index {index}: {observed} != {expected}')
+        handle.write(f'{expected:.8e} {y:.8e}\n')
+PY_NORMALIZE
+}
+
 # ------------------------------------------------------------------------------
 # Plan non-overwriting output directories
 # ------------------------------------------------------------------------------
@@ -799,7 +926,7 @@ else
     CANDIDATE_LABEL="$(sanitize_label "$CANDIDATE")"
 fi
 
-TASK_LABEL="$(sanitize_label "$TASK")"
+TASK_LABEL="$(sanitize_label "${TASK}_${SIGMAV_PROFILE}")"
 
 declare -A CARD_OUTPUTS=()
 declare -A CARD_NEQ_DONE=()
@@ -825,6 +952,15 @@ for card in "${cards[@]}"; do
     CARD_NEQ_DONE["$card"]=0
 done
 
+declare -A CARD_DM_MASSES=()
+for card in "${cards[@]}"; do
+    if ! mass="$(resolve_candidate_mass "$card" "$CANDIDATE_PDG")"; then
+        echo "ERROR: Could not obtain DM mass for $card (PDG $CANDIDATE_PDG)." >&2
+        exit 1
+    fi
+    CARD_DM_MASSES["$card"]="$mass"
+done
+
 # ------------------------------------------------------------------------------
 # Run preview
 # ------------------------------------------------------------------------------
@@ -840,14 +976,15 @@ echo "Build directory    : $BUILD_DIR"
 echo "Cards directory    : $CARDS_DIR"
 echo "UI2 report         : ${SELECTION_REPORT:-none (manual run)}"
 echo "Output root        : $OUTPUT_ROOT"
-echo "Task               : $TASK"
+echo "Task               : $TASK ($SIGMAV_PROFILE)"
+echo "Sigma-v x interval : $X_START .. $X_END ($N_POINTS samples)"
 echo "Selection mode     : $MODE"
 echo "Candidate          : $CANDIDATE${CANDIDATE_PDG:+ (PDG $CANDIDATE_PDG)}"
 echo "Selection source   : $SELECTION_SOURCE"
 echo "Selected processes : ${#subprocess_folders[@]} / ${#unfiltered_processes[@]}"
 echo "Parameter cards    : ${#cards[@]}"
 for card in "${cards[@]}"; do
-    echo "  - $(basename -- "$card") -> ${CARD_OUTPUTS[$card]}"
+    echo "  - $(basename -- "$card") [mDM=${CARD_DM_MASSES[$card]} GeV] -> ${CARD_OUTPUTS[$card]}"
 done
 echo "======================================================================"
 
@@ -918,6 +1055,11 @@ mode=$MODE
 candidate=$CANDIDATE
 candidate_pdg=$CANDIDATE_PDG
 task=$TASK
+sigmav_profile=$SIGMAV_PROFILE
+x_start=$X_START
+x_end=$X_END
+n_points=$N_POINTS
+dm_mass=${CARD_DM_MASSES[$card]}
 mg5_base_dir=$MG5_BASE_DIR
 mg5_output_folder=$MG5_OUTPUT_FOLDER
 build_dir=$BUILD_DIR
@@ -1014,29 +1156,24 @@ for sp_folder in "${subprocess_folders[@]}"; do
         out_dir="${CARD_OUTPUTS[$card]}"
         sigma_file="$out_dir/$sp_folder.dat"
 
-        if [[ "$TASK" == "relic" && "${CARD_NEQ_DONE[$card]}" -eq 0 ]]; then
-            # This is exactly the density-specific branch used by overseer.sh.in:
-            # passing a second path asks sigmav to create neq.dat.
-            if "$BIN_DIR/sigmav" "$card" "$out_dir/neq.dat" > "$sigma_file"; then
-                CARD_NEQ_DONE["$card"]=1
+        raw_file="$out_dir/.${sp_folder}.stdout.tmp"
+        if "$BIN_DIR/sigmav" --input-card "$card" --mDM "${CARD_DM_MASSES[$card]}" \
+              --x0 "$X_START" --xf "$X_END" --n-points "$N_POINTS" > "$raw_file"; then
+            if normalize_sigmav_table "$raw_file" "$sigma_file"; then
                 printf '%s\n' "$sigma_file" >> "$out_dir/.sigmav_files.list"
             else
-                echo "ERROR: sigmav failed for $sp_folder / $(basename -- "$card")" >&2
-                echo "$sp_folder : sigmav failed" >> "$out_dir/failed_processes.txt"
+                echo "ERROR: Invalid sigma-v data for $sp_folder / $(basename -- "$card")" >&2
+                echo "$sp_folder : invalid sigma-v data" >> "$out_dir/failed_processes.txt"
                 rm -f -- "$sigma_file"
                 PIPELINE_FAILED=1
             fi
         else
-            # sigmaV-only calls do not request neq.dat.
-            if "$BIN_DIR/sigmav" "$card" > "$sigma_file"; then
-                printf '%s\n' "$sigma_file" >> "$out_dir/.sigmav_files.list"
-            else
-                echo "ERROR: sigmav failed for $sp_folder / $(basename -- "$card")" >&2
-                echo "$sp_folder : sigmav failed" >> "$out_dir/failed_processes.txt"
-                rm -f -- "$sigma_file"
-                PIPELINE_FAILED=1
-            fi
+            echo "ERROR: sigmav failed for $sp_folder / $(basename -- "$card")" >&2
+            echo "$sp_folder : sigmav failed" >> "$out_dir/failed_processes.txt"
+            rm -f -- "$sigma_file"
+            PIPELINE_FAILED=1
         fi
+        rm -f -- "$raw_file"
     done
 done
 
@@ -1075,11 +1212,7 @@ EOF_META_END
     echo "Output             : $out_dir"
     echo "sigmaV files       : $successful_count"
     echo "TOTALS_T.dat       : $out_dir/TOTALS_T.dat"
-    if [[ "$TASK" == "relic" ]]; then
-        echo "neq.dat            : $out_dir/neq.dat"
-    else
-        echo "neq.dat            : not requested (sigmav mode)"
-    fi
+    echo "neq.dat            : not requested (relic paused)"
     echo "Failed processes   : $failed_count"
     echo ""
 done
