@@ -174,7 +174,7 @@ double sigma_v(double T){
 int main(int argc, char** argv){
 
   string input_card;
-  double x0, xf;
+  double x0, xf, m1;
   int N;
   po::options_description desc{"Options"};
   desc.add_options()
@@ -183,6 +183,7 @@ int main(int argc, char** argv){
     ("input-card", po::value<string>(&input_card), "Param card to analyze")
     ("x0", po::value<double>(&x0)->default_value(1.e-10), "Initial value for x")
     ("xf", po::value<double>(&xf)->default_value(1.e+7), "Final value for x")
+    ("mDM,m", po::value<double>(&m1), "Mass of the dark matter candidate in GeV")
     ("n_points,n", po::value<int>(&N)->default_value(1000), "Number of points between x0 and xf (inclusive) to be evaluated");
     
   po::variables_map vm;
@@ -198,7 +199,9 @@ int main(int argc, char** argv){
     std::string card = input_card;
     process.initProc(card);
     const vector<double> newMasses = process.getNewMasses();
-    const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
+    if (!vm.count("input-card")) {
+      m1 = *std::min_element(newMasses.begin(), newMasses.end());
+    }
     
     const double mi1 = process.getMasses().at(0);
     const double mi2 = process.getMasses().at(1);
