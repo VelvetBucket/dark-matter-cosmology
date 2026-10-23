@@ -21,18 +21,18 @@ double Temp(double a){
   return xlog_ylog_interpolator(T_a, a);
 }
 
-vector<double> Nsolver(const vector<pair<double,double>> neq_Temp_data, const vector<pair<double,double>> sigmav_x_data, const double j_i, const double N_i, double h = 0.01, const double rtol = 1.e-2, const double atol = 1.e-8, const bool debug = false){
+vector<double> Nsolver(const vector<pair<double,double>> neq_x_data, const vector<pair<double,double>> sigmav_x_data, const double j_i, const double N_i, double h = 0.01, const double rtol = 1.e-2, const double atol = 1.e-8, const bool debug = false){
   
   const double m1 = 1.87710315e+00, h_min = 1.e-9;
   const double a_i = exp(j_i), T_i = Temp(a_i), H_i = Hubble(a_i);
   const double sigmav_i = xlog_ylog_interpolator(sigmav_x_data, m1/T_i);
-  const double Neq_i = pow(a_i, 3) * xlog_ylog_interpolator(neq_Temp_data, T_i); 
+  const double Neq_i = pow(a_i, 3) * xlog_ylog_interpolator(neq_x_data, m1/T_i); 
   const double z_i = sigmav_i/(pow(a_i, 3)*H_i);
   
   double j_iplus = j_i + h, a_iplus = exp(j_iplus);
   double T_iplus = Temp(a_iplus), H_iplus = Hubble(a_iplus);
   double sigmav_iplus = xlog_ylog_interpolator(sigmav_x_data, m1/T_iplus);
-  double Neq_iplus = pow(a_iplus, 3) * xlog_ylog_interpolator(neq_Temp_data, T_iplus); 
+  double Neq_iplus = pow(a_iplus, 3) * xlog_ylog_interpolator(neq_x_data, m1/T_iplus); 
   double z_iplus = sigmav_iplus/(pow(a_iplus, 3)*H_iplus);
   
   double NT, NE, NT_old, diff;
@@ -45,7 +45,7 @@ vector<double> Nsolver(const vector<pair<double,double>> neq_Temp_data, const ve
     T_iplus = Temp(a_iplus);
     H_iplus = Hubble(a_iplus);
     sigmav_iplus = xlog_ylog_interpolator(sigmav_x_data, m1/T_iplus);
-    Neq_iplus = pow(a_iplus, 3) * xlog_ylog_interpolator(neq_Temp_data, T_iplus); 
+    Neq_iplus = pow(a_iplus, 3) * xlog_ylog_interpolator(neq_x_data, m1/T_iplus); 
     z_iplus = sigmav_iplus/(pow(a_iplus, 3)*H_iplus);
   } 
   
@@ -75,7 +75,7 @@ vector<double> Nsolver(const vector<pair<double,double>> neq_Temp_data, const ve
     T_iplus = Temp(a_iplus);
     H_iplus = Hubble(a_iplus);
     sigmav_iplus = xlog_ylog_interpolator(sigmav_x_data, m1/T_iplus);
-    Neq_iplus = pow(a_iplus, 3) * xlog_ylog_interpolator(neq_Temp_data, T_iplus); 
+    Neq_iplus = pow(a_iplus, 3) * xlog_ylog_interpolator(neq_x_data, m1/T_iplus); 
     z_iplus = sigmav_iplus/(pow(a_iplus, 3)*H_iplus);
     
     u = h*z_iplus;
@@ -98,7 +98,7 @@ vector<double> Nsolver(const vector<pair<double,double>> neq_Temp_data, const ve
     T_iplus = Temp(a_iplus);
     H_iplus = Hubble(a_iplus);
     sigmav_iplus = xlog_ylog_interpolator(sigmav_x_data, m1/T_iplus);
-    Neq_iplus = pow(a_iplus, 3) * xlog_ylog_interpolator(neq_Temp_data, T_iplus); 
+    Neq_iplus = pow(a_iplus, 3) * xlog_ylog_interpolator(neq_x_data, m1/T_iplus); 
     z_iplus = sigmav_iplus/(pow(a_iplus, 3)*H_iplus);
     
     u = h*z_iplus;
@@ -137,12 +137,13 @@ int main(int argc, char** argv){
   
   const string card = "35_75-1";
   
-  const vector<pair<double,double>> neq_Temp_data = datatable_to_pairs(data_extractor("./output/" + card + "/neq.dat"));
+  const vector<pair<double,double>> neq_x_data = datatable_to_pairs(data_extractor("./output/" + card + "/neq.dat"));
   const vector<pair<double,double>> sigmav_x_data = datatable_to_pairs(data_extractor("./output/" + card + "/TOTALS_T.dat"));
   
+  const double m1 = 1.87710315e+00;
   const double ai = 1.e-10, af = 1.e+10, default_h = 0.01;  
   double an = ai, jn = log(an), jf = log(af), Tn = Temp(an);
-  double Nn = pow(ai, 3) * xlog_ylog_interpolator(neq_Temp_data, Tn);
+  double Nn = pow(ai, 3) * xlog_ylog_interpolator(neq_x_data, m1/Tn);
   double Neqn = Nn;
   double h = default_h, rel_err = 0.;
   bool plateau = false;
@@ -157,7 +158,7 @@ int main(int argc, char** argv){
     h = 2.*min(default_h, (jf-jn));
     //cout << jf << endl;
     //cout << h << endl;
-    results = Nsolver(neq_Temp_data, sigmav_x_data, jn, Nn, h, 1.e-2, 1.e-20, false);
+    results = Nsolver(neq_x_data, sigmav_x_data, jn, Nn, h, 1.e-2, 1.e-20, false);
     h = results[0] - jn; 
     jn = results[0];
     
