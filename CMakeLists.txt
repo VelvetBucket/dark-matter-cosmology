@@ -21,6 +21,7 @@
 
 cmake_minimum_required(VERSION 3.10)
 project(dark_matter_cosmology VERSION 1.0.0 LANGUAGES CXX)
+find_package(Boost REQUIRED COMPONENTS program_options)
 
 # Ensure every target's runtime output goes into build/bin/
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
@@ -98,8 +99,9 @@ if(NOT MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-function")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-misleading-indentation")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-comment")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-int-in-bool-context")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-sign-compare")
 endif()
-
 
 # ==============================================================================
 # Build-tree directories
@@ -293,7 +295,7 @@ add_executable(sigmav    "${CMAKE_CURRENT_SOURCE_DIR}/src/main/sigmav.cpp")
 add_executable(evolution "${CMAKE_CURRENT_SOURCE_DIR}/src/main/evolution.cpp")
 add_executable(interp    "${CMAKE_CURRENT_SOURCE_DIR}/src/main/interp.cpp")
 
-target_link_libraries(sigmav    core_lib gsl gslcblas m)
+target_link_libraries(sigmav    core_lib gsl gslcblas m Boost::program_options)
 target_link_libraries(evolution core_lib)
 target_link_libraries(interp    core_lib)
 

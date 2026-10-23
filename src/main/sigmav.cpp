@@ -10,9 +10,12 @@
 #include <unordered_map>
 #include <boost/math/quadrature/gauss_kronrod.hpp>
 #include <boost/math/quadrature/tanh_sinh.hpp>
+#include <boost/program_options.hpp>
 #include <gsl/gsl_sf_bessel.h>
+#include <stdexcept>
 
 using namespace std;
+namespace po = boost::program_options;
 
 CPPProcess process;
 
@@ -169,61 +172,79 @@ double sigma_v(double T){
 }
 
 int main(int argc, char** argv){
-	
-  std::string card = argv[1];
-  process.initProc(card);
-  
-  const vector<double> newMasses = process.getNewMasses();
-  const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
-  
-  const double mi1 = process.getMasses().at(0);
-  const double mi2 = process.getMasses().at(1);
-  int N = 1000, N_neq = 10*N, Err=1;
-  double Ti = m1*1e+10, Tf = m1*1e-7 , ui = log(Ti), h=log(Tf/Ti)/(N-1), Tn = Tf;
-  double h_neq = log(Tf/Ti)/(N_neq-1);
-  //double si=1e+8, sf=1e+18, h = log(sf/si)/(N-1), T= m1*1e+4, zi = log(si), zn;
-  //double ui=1e-1, uf=1e+3, h = log(uf/ui)/(N-1), si=log(ui), T = m1/20.;
-  double un, sn, sig;
-  h = -0.04;
-  //double Tn = m1*1e+01;
-  
-  if (argc == 3) {
-    std::string neq_file = argv[2];
-    const vector<std::pair<double, double>> newDOF = process.getNewDOF();
-    double mi, neq, k2_mi;
-    ofstream myFile(neq_file);
+
+  string input_card;
+  double x0, xf;
+  int N;
+  po::options_description desc{"Options"};
+  desc.add_options()
+    ("help,h", "Help screen")
+    ("neq", "Generate x vs n_equilibrium table")
+    ("input-card", po::value<string>(&input_card), "Param card to analyze")
+    ("x0", po::value<double>(&x0)->default_value(1.e-10), "Initial value for x")
+    ("xf", po::value<double>(&xf)->default_value(1.e+7), "Final value for x")
+    ("n_points,n", po::value<int>(&N)->default_value(1000), "Number of points between x0 and xf (inclusive) to be evaluated");
     
-    myFile << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1  << "\n";
+  po::variables_map vm;
+  po::store(po::parse_command_line(argc, argv, desc), vm);
+  po::notify(vm);
+
+  if (vm.count("help"))
+    std::cout << desc << '\n';
+  
+  if (vm.count("input-card")) {
+    std::cout << "Card: " << input_card << '\n';
+
+    std::string card = input_card;
+    process.initProc(card);
+    const vector<double> newMasses = process.getNewMasses();
+    const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
     
-    for(int n = 0; n < N_neq; n++){
-      un = ui + n*h_neq;
-      Tn = std::exp(un);
-      neq = 0.0;
-      k2_mi = 0.0;
-      for (auto mi_gi : newDOF) {
-        mi = mi_gi.first;
-        //cout << mi << " " << mi_gi.second << "\n";
-        k2_mi = bessK2(mi/Tn);
-        if (mi/Tn > 10.0 || k2_mi == 0.0) {
-          k2_mi = exp(-mi/Tn) * gsl_sf_bessel_Kn_scaled(2, mi/Tn);
-        } 
-        if (true){
+    const double mi1 = process.getMasses().at(0);
+    const double mi2 = process.getMasses().at(1);
+    double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
+    double un, Tn, sigv_n;
+    
+    cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
+    
+    if (vm.count("neq")) {
+      
+      const vector<std::pair<double, double>> newDOF = process.getNewDOF();
+      double N_neq = 10*N, h_neq = log(Tf/T0)/(N_neq-1);
+      double mi, neq, k2_mi;
+      
+      cout << "# x (DM_candidate_mass/T) vs. n_equilibrium" << endl;
+      
+      for(int n = 0; n < N_neq; n++){
+        un = ui + n*h_neq;
+        Tn = std::exp(un);
+        neq = 0.0;
+        k2_mi = 0.0;
+        for (auto mi_gi : newDOF) {
+          mi = mi_gi.first;
+          k2_mi = bessK2(mi/Tn);
+          if (mi/Tn > 10.0 || k2_mi == 0.0) {
+            k2_mi = exp(-mi/Tn) * gsl_sf_bessel_Kn_scaled(2, mi/Tn);
+          } 
           neq += mi_gi.second * pow(mi,2) * k2_mi;
         }
+        neq *= Tn/(2.0*pow(M_PI,2)); 
+        cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << neq  << "\n";
       }
-      neq *= Tn/(2.0*pow(M_PI,2)); 
-      myFile << setiosflags(ios::scientific) << setprecision(8) << Tn << " " << neq  << "\n";
-    }
+      
+    } else {
     
-    myFile.close();
+      cout << "# x (DM_candidate_mass/T) vs. sigma*v" << endl;
+      //cout << m1 << "\n";
+      for(int n = 0; n < N; n++){
+        un = ui + n*h;
+        Tn = std::exp(un);
+        sigv_n = sigma_v(Tn);
+        cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << sigv_n << "\n";
+      }
+    
+    }
   }
-  //cout << m1 << "\n";
-  for(int n = 0; n < N; n++){
-    un = ui + n*h;
-    Tn = std::exp(un);
-    sig = sigma_v(Tn);
-    cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << sig << "\n";
-  }
- 
+  
   return 0;
 }
