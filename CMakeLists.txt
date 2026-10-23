@@ -21,7 +21,7 @@
 
 cmake_minimum_required(VERSION 3.10)
 project(dark_matter_cosmology VERSION 1.0.0 LANGUAGES CXX)
-find_package(Boost REQUIRED COMPONENTS program_options)
+find_package(Boost REQUIRED CONFIG COMPONENTS program_options)
 
 # Ensure every target's runtime output goes into build/bin/
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
