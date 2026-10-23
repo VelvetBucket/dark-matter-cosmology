@@ -14,7 +14,7 @@ Selection modes:
 
 1. combined
    Performs a THERMAL PRESELECTION of possible coannihilators.  x_f=m_DM/T
-   defaults to 25 and enters the equilibrium-density ratio
+   defaults to 15 and enters the equilibrium-density ratio
 
        n_i^eq / n_DM^eq
          ~= (g_i/g_DM) (m_i/m_DM)^(3/2) exp[-x_f Delta_i].
@@ -25,11 +25,11 @@ Selection modes:
    dynamically.  Its actual importance requires sigma-v information.
 
  2. pdg
-    Manual selection. UI1 supplies the candidate; --coannihilators lists only
-    partner PDGs. Legacy --pdgs still accepts candidate first (must match UI1).
+    Manual selection. UI2 identifies the candidate for each parameter card; --coannihilators lists only
+    partner PDGs. Legacy --pdgs still accepts candidate first.
 
-After selection, both relic-density and sigma-v tasks are delegated to the
-CMake-generated Kerrigan.sh runtime.  --task sigmav computes sigmaV/TOTALS_T
+After selection, sigma-v calculations are delegated to the CMake-generated
+Kerrigan.sh runtime. Relic density remains paused. --task sigmav computes sigmaV/TOTALS_T
 for the thermally/manual selected set; UI2 does NOT currently use sigma-v as an
 automatic pruning gate because this file has no validated per-process sigma-v
 contribution parser/threshold.  Therefore the report explicitly distinguishes
@@ -105,7 +105,7 @@ SCOTOGENIC_DOF: dict[int, float] = {
 
 PROCESS_MARKER = "_UFO_"
 
-DEFAULT_XF = 25.0
+DEFAULT_XF = 15.0
 DEFAULT_MAX_DELTA = 0.25
 DEFAULT_MIN_RELATIVE_WEIGHT = 1.0e-3
 DEFAULT_WIDTH_TOLERANCE = 1.0e-30
@@ -271,7 +271,7 @@ def _ufo_species(variant_root: Path) -> tuple[Path, dict[str, tuple[int, Optiona
 
 
 def read_ui1_odd_sector(layout: RuntimeLayout, explicit_path: Optional[Path] = None) -> Optional[UI1OddSector]:
-    """Read UI1's selected Z2-odd sector and candidate, without guessing PDGs."""
+    """Read UI1's Z2-odd sector, optionally supporting legacy candidate headers."""
     odd_file = explicit_path.expanduser().resolve() if explicit_path is not None else (
         layout.model_root / "odd_particles.txt"
     ).resolve()
@@ -676,7 +676,7 @@ def validate_candidate(
         if particle.pdg != candidate.pdg
         and particle.mass > 0.0
         and particle.mass < candidate.mass * (1.0 - 1.0e-12)
-        # UI1 excludes charged or unstable lighter states as DM candidates.
+        # Charged or unstable lighter odd particles do not necessarily disqualify a neutral stable DM candidate.
         # Unknown charge is NOT treated as a reason to exempt a lighter state.
         and not (
             charges_by_pdg is not None
@@ -706,6 +706,53 @@ def validate_candidate(
             )
 
     return warnings
+
+
+def identify_dm_candidate(
+    read_particles: list[Particle],
+    dark_particles: list[Particle],
+    charges_by_pdg: Optional[dict[int, Optional[float]]],
+    width_tolerance: float,
+    requested: Optional[object] = None,
+    ui1_candidate_pdg: Optional[int] = None,
+) -> Particle:
+    """Select the DM candidate per parameter card, not from UI1's sector list.
+
+    UI1 (PR #38) defines the odd sector only. We choose the unique lightest
+    known-neutral, known-stable odd state. Ambiguous or incomplete input must be
+    resolved explicitly with --candidate, never by choosing a random particle.
+    """
+    dark_pdgs = {particle.pdg for particle in dark_particles}
+    if ui1_candidate_pdg is not None:
+        if requested is not None and resolve_candidate(str(requested), read_particles).pdg != ui1_candidate_pdg:
+            raise ValueError("--candidate conflicts with legacy UI1 DM metadata")
+        requested = ui1_candidate_pdg
+    if requested is not None:
+        chosen = resolve_candidate(str(requested), read_particles)
+        if chosen.pdg not in dark_pdgs:
+            raise ValueError(f"DM candidate {chosen.pdg} is not part of UI1's odd sector")
+        return chosen
+    eligible = [
+        p for p in dark_particles
+        if p.mass > 0 and math.isfinite(p.mass)
+        and p.width is not None and math.isfinite(p.width)
+        and abs(p.width) <= width_tolerance
+        and (charges_by_pdg is not None and charges_by_pdg.get(p.pdg) is not None)
+        and abs(charges_by_pdg[p.pdg]) <= 1e-12
+    ]
+    if not eligible:
+        raise ValueError(
+            "No unambiguous neutral/stable DM candidate could be determined from this card. "
+            "Specify --candidate PDG, ensuring the card contains its mass/DECAY width."
+        )
+    eligible.sort(key=lambda particle: particle.mass)
+    lightest = eligible[0]
+    if len(eligible) > 1 and math.isclose(eligible[1].mass, lightest.mass, rel_tol=1e-12, abs_tol=1e-12):
+        raise ValueError(
+            "Multiple neutral/stable odd states share the lightest mass: "
+            f"PDG {lightest.pdg} and {eligible[1].pdg}. Pass --candidate explicitly."
+        )
+    return lightest
 
 
 def build_effective_dark_sector(
@@ -2291,6 +2338,25 @@ def infer_mg5_output(subprocesses_dir: Path, explicit_value: Optional[object]) -
     return None
 
 
+def resolve_sigmav_interval(
+    profile: str, x_freezeout: float,
+    requested_start: Optional[float], requested_end: Optional[float],
+    n_points: int,
+) -> tuple[float, float, int]:
+    """Distinguish the thermal x_FO reference from the executable's x bounds."""
+    if profile not in {"history", "freezeout"}:
+        raise ValueError("--sigmav-profile must be history or freezeout")
+    start_default, end_default = ((1e-10, 1e7) if profile == "history"
+                                  else (x_freezeout / 10.0, x_freezeout * 10.0))
+    x_start = start_default if requested_start is None else float(requested_start)
+    x_end = end_default if requested_end is None else float(requested_end)
+    if not (math.isfinite(x_start) and math.isfinite(x_end) and 0 < x_start < x_end):
+        raise ValueError("Expected finite bounds satisfying 0 < --x-start < --x-end")
+    if n_points < 2 or n_points > 1000000:
+        raise ValueError("--n-points must be between 2 and 1000000")
+    return x_start, x_end, n_points
+
+
 def run_kerrigan(
     kerrigan: Path,
     build_dir: Path,
@@ -2304,6 +2370,10 @@ def run_kerrigan(
     physics_output_root: Optional[Path],
     verbose: bool,
     cards_dir: Optional[Path] = None,
+    sigmav_profile: str = "history",
+    x_start: float = 1e-10,
+    x_end: float = 1e7,
+    n_points: int = 1000,
 ) -> None:
     """Invoke Kerrigan once for a physics point or for a compatible card batch.
 
@@ -2324,6 +2394,10 @@ def run_kerrigan(
         "--candidate", candidate.name,
         "--candidate-pdg", str(candidate.pdg),
         "--process-selector", selector_regex,
+        "--sigmav-profile", sigmav_profile,
+        "--x-start", str(x_start),
+        "--x-end", str(x_end),
+        "--n-points", str(n_points),
     ]
     if selection_report is not None:
         command.extend(["--selection-report", str(selection_report.resolve())])
@@ -2358,10 +2432,11 @@ def run_kerrigan(
         if cards_dir is not None:
             print(f"Cards directory    : {cards_dir}")
         print(f"Task               : {task}")
+        print(f"Sigma-v profile    : {sigmav_profile} ({x_start:g} <= x <= {x_end:g}; {n_points} points)")
         if task == "sigmav":
             print("Pipeline            : sigmaV only (relic-density branch disabled)")
         else:
-            print("Pipeline            : relic density")
+            print("Pipeline            : unsupported relic density")
         print(
             f"Filtered processes : exact selector with "
             f"{selector_regex.count('|') + 1} directories"
@@ -2442,31 +2517,27 @@ def analyze_batch_card(
             if custom.pdg != ui1_candidate.pdg:
                 raise ValueError(f"UI1_SYNC: --candidate conflicts with UI1 in {card.name}")
 
+    ui1_pdg = None if ui1_candidate is None else ui1_candidate.pdg
+    requested_candidate = candidate_config
+    if mode == "pdg" and manual_pdgs:
+        if requested_candidate is not None and resolve_candidate(str(requested_candidate), read_particles).pdg != manual_pdgs[0]:
+            raise ValueError(f"--candidate conflicts with first --pdgs value in {card.name}")
+        requested_candidate = manual_pdgs[0]
+    candidate = identify_dm_candidate(
+        read_particles, dark_particles, charges, width_tolerance,
+        requested=requested_candidate, ui1_candidate_pdg=ui1_pdg,
+    )
     selected_manual = list(manual_pdgs)
     if mode == "pdg":
         if partner_pdgs:
-            if ui1_candidate is None:
-                raise ValueError("--coannihilators requires the UI1 DM-candidate header")
-            selected_manual = [ui1_candidate.pdg] + unique_pdgs(partner_pdgs)
+            selected_manual = [candidate.pdg] + unique_pdgs(partner_pdgs)
         elif not selected_manual:
-            if ui1_candidate is None:
-                raise ValueError(f"PDG mode needs --pdgs or UI1 candidate metadata for {card.name}")
-            selected_manual = [ui1_candidate.pdg]
+            selected_manual = [candidate.pdg]
         selected_manual = unique_pdgs(selected_manual)
-        candidate = particle_by_pdg(read_particles, selected_manual[0])
-        if ui1_candidate is not None and candidate.pdg != ui1_candidate.pdg:
-            raise ValueError(f"UI1_SYNC: first --pdgs value conflicts with UI1 for {card.name}")
-        if candidate_config is not None and resolve_candidate(str(candidate_config), read_particles).pdg != candidate.pdg:
-            raise ValueError(f"--candidate conflicts with --pdgs for {card.name}")
+        if selected_manual[0] != candidate.pdg:
+            raise ValueError(f"First manual PDG must be candidate {candidate.pdg} for {card.name}")
         if ui1_sector is not None and not set(selected_manual).issubset(ui1_sector.dark_pdgs):
-            raise ValueError(f"UI1_SYNC: requested coannihilators are outside UI1 sector for {card.name}")
-    else:
-        if ui1_candidate is not None:
-            candidate = ui1_candidate
-        elif candidate_config is not None:
-            candidate = resolve_candidate(str(candidate_config), read_particles)
-        else:
-            raise ValueError(f"No UI1 candidate header; provide --candidate for card {card.name}")
+            raise ValueError(f"Coannihilators are outside the UI1 odd sector in {card.name}")
 
     if ui1_sector is not None and candidate.pdg not in ui1_sector.dark_pdgs:
         raise ValueError(f"UI1_SYNC: candidate is absent from odd-sector in {card.name}")
@@ -2552,6 +2623,10 @@ def run_card_batch(
     task: str,
     verbose: bool,
     backup: bool,
+    sigmav_profile: str,
+    x_start: float,
+    x_end: float,
+    n_points: int,
 ) -> int:
     """Preflight all cards, then compile once/process if selections coincide."""
     if cards_dir is None:
@@ -2600,8 +2675,8 @@ def run_card_batch(
         raise ValueError("UI1_SYNC: --odd-file cannot point outside the selected model root")
     ui1_sector = read_ui1_odd_sector(layout, odd_file)
     if ui1_sector is not None and len(cards) > 1:
-        print("NOTE: UI1 does not record its reference param_card. Each card will be independently "
-              "validated against the selected DM candidate before any calculation.")
+        print("NOTE: UI1 defines the Z2-odd sector, not the DM candidate; "
+              "UI2 validates and selects the DM candidate independently for each card.")
 
     requested_dark_pdgs = parse_dark_pdgs(
         config_value(args.dark_pdgs, file_config, "dark_pdgs", None)
@@ -2625,13 +2700,15 @@ def run_card_batch(
         raise ValueError("Batch preflight failed; no physics outputs were changed:\n" + "\n".join(problems))
 
     signatures = {plan.selected_names for plan in plans}
-    combined_batch = len(signatures) == 1
+    candidate_pdgs = {plan.candidate.pdg for plan in plans}
+    combined_batch = len(signatures) == 1 and len(candidate_pdgs) == 1
     print("\nUI2 multi-card preflight")
     print(f"  Model             : {layout.model_label}")
     print(f"  Cards directory   : {cards_dir}")
     print(f"  Matched cards     : {len(plans)} ({pattern})")
-    print(f"  DM candidate      : PDG {plans[0].candidate.pdg} (from UI1 if available)")
+    print(f"  DM candidates     : {sorted(candidate_pdgs)} (validated independently for each card)")
     print(f"  Unique selections : {len(signatures)}")
+    print(f"  Sigma-v interval  : {sigmav_profile}, x=[{x_start:g}, {x_end:g}], N={n_points}")
     print(f"  Execution plan    : {'one Kerrigan run (compile once per process)' if combined_batch else 'separate Kerrigan runs (different per-card processes)'}")
     for plan in plans:
         print(f"    {plan.card.name}: {len(plan.selected_names)} processes")
@@ -2639,8 +2716,8 @@ def run_card_batch(
             for warning in plan.warnings:
                 print(f"      WARNING: {warning}")
     if not combined_batch:
-        print("WARNING: Thermal/manual process sets differ across cards. UI2 will NOT sum "
-              "extra processes into a card's TOTALS_T; each card runs with its own selector.")
+        print("WARNING: Selected processes or DM candidates differ across cards. "
+              "Each card will run independently using its own candidate and processes.")
     if args.dry_run:
         print("Dry run complete: no copies, compilation, or calculations.")
         return 0
@@ -2664,6 +2741,7 @@ def run_card_batch(
         "min_relative_weight": min_relative_weight,
         "width_tolerance": width_tolerance,
         "task": task, "verbose": verbose, "backup": backup,
+        "sigmav_profile": sigmav_profile, "x_start": x_start, "x_end": x_end, "n_points": n_points,
         "cards_dir": str(cards_dir), "cmake_build_dir": str(build_dir),
         "kerrigan_runtime": str(kerrigan),
         "mg5_output": None if mg5_output is None else str(mg5_output),
@@ -2731,6 +2809,7 @@ def run_card_batch(
             mg5_output=mg5_output,
             physics_output_root=physics_root,
             verbose=verbose,
+            sigmav_profile=sigmav_profile, x_start=x_start, x_end=x_end, n_points=n_points,
         )
     else:
         # A different combined-mode selection changes the physical sum. Do NOT
@@ -2748,6 +2827,7 @@ def run_card_batch(
                 mg5_output=mg5_output,
                 physics_output_root=physics_root,
                 verbose=verbose,
+                sigmav_profile=sigmav_profile, x_start=x_start, x_end=x_end, n_points=n_points,
             )
     print(f"\nCompleted sigma-v for {len(plans)} parameter cards.")
     return 0
@@ -2760,7 +2840,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Select scotogenic subprocesses in combined or manual-PDG mode, "
             "optionally show the full UI, copy the clean selection and delegate "
-            "both relic-density and sigmaV tasks to CMake-configured Kerrigan."
+            "sigma-v calculation to CMake-configured Kerrigan; relic remains paused."
         )
     )
 
@@ -2841,7 +2921,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--candidate",
         default=None,
-        help="Advanced check: candidate name/PDG must match UI1 when odd_particles.txt has a DM header.",
+        help="Override inferred DM candidate (PDG or name). UI1 now supplies the odd sector, not DM identity.",
     )
 
     parser.add_argument(
@@ -2850,7 +2930,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Legacy manual PDG mode. First PDG must match UI1's DM candidate; "
+            "Legacy manual PDG mode. First PDG is the explicit DM candidate; "
             "remaining PDGs are coannihilation partners. Prefer --coannihilators."
         ),
     )
@@ -2858,7 +2938,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--coannihilators", "--partner-pdgs",
         nargs="+", type=int, default=None,
-        help="Manual PDG mode: partner PDGs only; DM candidate is read from UI1.",
+        help="Manual PDG mode: partner PDGs only; DM candidate is inferred for each param_card.",
     )
     parser.add_argument(
         "--odd-file", type=Path, default=None,
@@ -2874,8 +2954,26 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Advanced override. x_f=m_DM/T used ONLY by the combined thermal "
             "preselection through exp[-x_f Delta]. In pdg mode it is diagnostic only. "
-            "Default: 25."
+            "Default: 15."
         ),
+    )
+
+    parser.add_argument(
+        "--sigmav-profile", "--profile", choices=["history", "freezeout"], default=None,
+        help="Sigma-v evaluation interval: history (1e-10..1e7) or freezeout "
+             "(x_FO/10..10*x_FO). Default: history.",
+    )
+    parser.add_argument(
+        "--x-start", type=float, default=None,
+        help="Override the initial sigma-v evaluation x=m_DM/T (not the thermal x_FO).",
+    )
+    parser.add_argument(
+        "--x-end", type=float, default=None,
+        help="Override the final sigma-v evaluation x=m_DM/T.",
+    )
+    parser.add_argument(
+        "--n-points", type=int, default=None,
+        help="Number of output points for sigma-v. Default: 1000.",
     )
 
     parser.add_argument(
@@ -3048,6 +3146,13 @@ def main() -> int:
         raise ValueError("mode must be 'combined' or 'pdg'.")
 
     xf = float(config_value(args.xf, file_config, "xf", DEFAULT_XF))
+    sigmav_profile = str(config_value(args.sigmav_profile, file_config, "sigmav_profile", "history")).lower()
+    x_start, x_end, n_points = resolve_sigmav_interval(
+        sigmav_profile, xf,
+        config_value(args.x_start, file_config, "x_start", None),
+        config_value(args.x_end, file_config, "x_end", None),
+        int(config_value(args.n_points, file_config, "n_points", 1000)),
+    )
     max_delta = float(config_value(args.max_delta, file_config, "max_delta", DEFAULT_MAX_DELTA))
     min_relative_weight = float(
         config_value(args.min_relative_weight, file_config, "min_relative_weight", DEFAULT_MIN_RELATIVE_WEIGHT)
@@ -3145,6 +3250,7 @@ def main() -> int:
             args, file_config, config_dir, layout, cards_dir,
             mode, manual_pdgs, partner_pdgs, xf, max_delta,
             min_relative_weight, width_tolerance, task, verbose, backup,
+            sigmav_profile, x_start, x_end, n_points,
         )
 
     param_card = resolve_ui2_param_card(
@@ -3228,18 +3334,6 @@ def main() -> int:
         if not _is_within(explicit_odd_file, layout.model_root):
             raise ValueError("UI1_SYNC: --odd-file cannot point outside the selected model root")
     ui1_sector = read_ui1_odd_sector(layout, explicit_odd_file)
-    if ui1_sector is not None and layout.cards_dir is not None:
-        model_cards = list_param_cards(layout.cards_dir)
-        if len(model_cards) > 1:
-            print(
-                "WARNING: UI1's odd_particles.txt does not record which parameter "
-                "card was used to determine its DM candidate. More than one card "
-                f"exists in {layout.cards_dir}; validate that {param_card} is the "
-                "same physics point selected in UI1. UI2 will independently "
-                "revalidate the candidate against this card.",
-                file=sys.stderr,
-            )
-
     dark_pdgs_value = config_value(args.dark_pdgs, file_config, "dark_pdgs", None)
     requested_dark_pdgs = parse_dark_pdgs(
         None if dark_pdgs_value is None else str(dark_pdgs_value)
@@ -3267,64 +3361,27 @@ def main() -> int:
         dark_particles = get_dark_particles(read_particles, requested_dark_pdgs)
 
     candidate_config = config_value(args.candidate, file_config, "candidate", None)
-    ui1_candidate = None
-    if ui1_sector is not None and ui1_sector.candidate_pdg is not None:
-        ui1_candidate = particle_by_pdg(read_particles, ui1_sector.candidate_pdg)
-        if candidate_config is not None:
-            user_candidate = resolve_candidate(str(candidate_config), read_particles)
-            if user_candidate.pdg != ui1_candidate.pdg:
-                raise ValueError(
-                    f"UI1_SYNC: --candidate PDG {user_candidate.pdg} conflicts with "
-                    f"UI1 DM candidate PDG {ui1_candidate.pdg}. Rerun UI1 to change the candidate."
-                )
-        print(f"UI1 dark-matter candidate: {ui1_sector.candidate_name} "
-              f"(PDG {ui1_candidate.pdg}), read from {ui1_sector.source}")
-    elif ui1_sector is not None:
-        # Older four-column UI1 output is accepted but must not imply a DM identity.
-        print(f"WARNING: {ui1_sector.source} has no DM-candidate metadata; "
-              "supply --candidate or rerun the updated UI1.", file=sys.stderr)
-
+    ui1_pdg = ui1_sector.candidate_pdg if ui1_sector is not None else None
+    if mode == "pdg" and manual_pdgs:
+        if candidate_config is not None and resolve_candidate(str(candidate_config), read_particles).pdg != manual_pdgs[0]:
+            raise ValueError("--candidate conflicts with first --pdgs value")
+        candidate_config = manual_pdgs[0]
+    candidate = identify_dm_candidate(
+        read_particles, dark_particles, charges_by_pdg, width_tolerance,
+        requested=candidate_config, ui1_candidate_pdg=ui1_pdg,
+    )
+    print(f"Dark-matter candidate: {candidate.name} (PDG {candidate.pdg}, "
+          f"mass={candidate.mass:.8g} GeV), validated against {param_card.name}")
     if mode == "pdg":
         if partner_pdgs:
-            if ui1_candidate is None:
-                raise ValueError("--coannihilators requires UI1 DM-candidate metadata; use --pdgs otherwise.")
-            manual_pdgs = [ui1_candidate.pdg] + unique_pdgs(partner_pdgs)
+            manual_pdgs = [candidate.pdg] + unique_pdgs(partner_pdgs)
         elif not manual_pdgs:
-            if ui1_candidate is not None:
-                manual_pdgs = [ui1_candidate.pdg]  # Candidate-only channel selection.
-            elif not sys.stdin.isatty():
-                raise ValueError("PDG mode requires --pdgs or UI1 DM-candidate metadata.")
-            else:
-                manual_pdgs = parse_pdg_tokens(
-                    input("Enter PDG codes (candidate first, then partners): ")
-                )
+            manual_pdgs = [candidate.pdg]
         manual_pdgs = unique_pdgs(manual_pdgs)
-        if not manual_pdgs:
-            raise ValueError("PDG mode requires a DM candidate.")
-        candidate = particle_by_pdg(read_particles, manual_pdgs[0])
-        if ui1_candidate is not None and candidate.pdg != ui1_candidate.pdg:
-            raise ValueError(
-                f"UI1_SYNC: First --pdgs value {candidate.pdg} is not the UI1 DM candidate "
-                f"{ui1_candidate.pdg}. Use --coannihilators for a partner-only list."
-            )
-        if candidate_config is not None:
-            candidate_from_flag = resolve_candidate(str(candidate_config), read_particles)
-            if candidate_from_flag.pdg != candidate.pdg:
-                raise ValueError("--candidate does not match the selected DM candidate in PDG mode.")
-        if ui1_sector is not None:
-            unexpected = sorted(set(manual_pdgs) - ui1_sector.dark_pdgs)
-            if unexpected:
-                raise ValueError(f"UI1_SYNC: Requested PDGs {unexpected} are not in UI1 odd_particles.txt")
-    else:
-        if ui1_candidate is not None:
-            candidate = ui1_candidate
-        else:
-            candidate_query = candidate_config
-            if candidate_query is None:
-                if not sys.stdin.isatty():
-                    raise ValueError("UI1 metadata is missing; rerun UI1 or explicitly supply --candidate.")
-                candidate_query = input("\nEnter the candidate's name, alias, or PDG code: ")
-            candidate = resolve_candidate(str(candidate_query), read_particles)
+        if manual_pdgs[0] != candidate.pdg:
+            raise ValueError("First manual PDG must match selected DM candidate")
+        if ui1_sector is not None and not set(manual_pdgs).issubset(ui1_sector.dark_pdgs):
+            raise ValueError("Manual PDGs contain particles outside the UI1 odd sector")
 
     if ui1_sector is not None and candidate.pdg not in ui1_sector.dark_pdgs:
         raise ValueError("UI1_SYNC: DM candidate is not part of the confirmed UI1 odd sector")
@@ -3498,6 +3555,8 @@ def main() -> int:
         ),
         "sigmav_filter_applied": False,
         "xf": xf,
+        "sigmav_profile": sigmav_profile,
+        "x_start": x_start, "x_end": x_end, "n_points": n_points,
         "x_ref": xf,
         "max_delta": max_delta,
         "min_relative_weight": min_relative_weight,
@@ -3559,6 +3618,7 @@ def main() -> int:
         mg5_output=mg5_output,
         physics_output_root=physics_output_root,
         verbose=verbose,
+        sigmav_profile=sigmav_profile, x_start=x_start, x_end=x_end, n_points=n_points,
     )
 
     if not verbose:
