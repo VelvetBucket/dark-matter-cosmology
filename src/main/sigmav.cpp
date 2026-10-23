@@ -184,7 +184,7 @@ int main(int argc, char** argv){
     ("x0", po::value<double>(&x0)->default_value(1.e-10), "Initial value for x")
     ("xf", po::value<double>(&xf)->default_value(1.e+7), "Final value for x")
     ("mDM,m", po::value<double>(&m1), "Mass of the dark matter candidate in GeV")
-    ("n_points,n", po::value<int>(&N)->default_value(1000), "Number of points between x0 and xf (inclusive) to be evaluated");
+    ("n-points,n", po::value<int>(&N)->default_value(1000), "Number of points between x0 and xf (inclusive) to be evaluated");
     
   po::variables_map vm;
   po::store(po::parse_command_line(argc, argv, desc), vm);
