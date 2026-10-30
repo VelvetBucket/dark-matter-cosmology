@@ -57,6 +57,7 @@ else
 fi
 # Cap to avoid thrashing
 JOBS=$(( JOBS / 2 ))
+[ "$JOBS" -gt 8 ] && JOBS=8
 [ "$JOBS" -lt 1 ] && JOBS=1
 # Allow override: JOBS=1 ./Kerrigan.sh DM_test
 JOBS="${JOBS_OVERRIDE:-$JOBS}"

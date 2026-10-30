@@ -210,7 +210,7 @@ int main(int argc, char** argv){
     // Parallel evaluation of sigma_v(Ts[n])
     std::vector<double> sigv(N, 0.0);
 
-    int n_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()) / 2);
+    int n_threads = std::min(8, static_cast<int>(std::thread::hardware_concurrency()) / 2);
     if (n_threads > N) n_threads = N;
     if (n_threads < 1) n_threads = 1;
 
