@@ -411,6 +411,34 @@ case "${LEGACY_GENERATE_NEQ,,}" in
     *) echo "ERROR: KERRIGAN_GENERATE_NEQ is obsolete; use --task neq." >&2; exit 2 ;;
 esac
 
+# Validate numerical bounds before touching generated artifacts.
+mapfile -t GRID_SETTINGS < <(python3 - "$SIGMAV_PROFILE" "$X_FREEZEOUT" "$X_START_INPUT" "$X_END_INPUT" "$N_POINTS" <<'PY_GRID'
+import math, sys
+p, freeze, start, end, n = sys.argv[1:]
+try:
+    if p not in ('history', 'freezeout'):
+        raise ValueError('profile must be history or freezeout')
+    f = float(freeze)
+    if not math.isfinite(f) or f <= 0:
+        raise ValueError('x-freezeout must be finite and positive')
+    s = float(start) if start else (1e-10 if p == 'history' else f/10.)
+    e = float(end) if end else (1e7 if p == 'history' else f*10.)
+    n = int(n)
+    if not (math.isfinite(s) and math.isfinite(e) and 0 < s < e and 2 <= n <= 1000000):
+        raise ValueError('expected finite 0 < x-start < x-end and 2 <= n-points <= 1000000')
+    print(f'{s:.17g}')
+    print(f'{e:.17g}')
+    print(n)
+except (ValueError, OverflowError) as ex:
+    print(f'ERROR: Invalid sigma-v grid: {ex}', file=sys.stderr)
+    sys.exit(2)
+PY_GRID
+)
+[[ ${#GRID_SETTINGS[@]} -eq 3 ]] || { echo 'ERROR: Invalid sigma-v grid.' >&2; exit 2; }
+X_START="${GRID_SETTINGS[0]}"
+X_END="${GRID_SETTINGS[1]}"
+N_POINTS="${GRID_SETTINGS[2]}"
+
 OUTPUT_ROOT="$(python3 - "$OUTPUT_ROOT" <<'PY_PATH'
 from pathlib import Path
 import sys
@@ -1071,6 +1099,15 @@ for card in "${cards[@]}"; do
     fi
 
     CARD_OUTPUTS["$card"]="$out_dir"
+done
+
+declare -A CARD_DM_MASSES=()
+for card in "${cards[@]}"; do
+    if ! mass="$(resolve_candidate_mass "$card" "$CANDIDATE_PDG")"; then
+        echo "ERROR: Could not obtain DM mass for $card (PDG $CANDIDATE_PDG)." >&2
+        exit 1
+    fi
+    CARD_DM_MASSES["$card"]="$mass"
 done
 
 declare -A CARD_DM_MASSES=()
