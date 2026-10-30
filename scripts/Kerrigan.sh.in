@@ -47,6 +47,32 @@ CONFIGURED_BUILD_DIR="@CMAKE_BINARY_DIR@"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+# ---- Parallel build job count (portable) ----
+if command -v nproc >/dev/null 2>&1; then
+    JOBS=$(nproc)
+elif command -v sysctl >/dev/null 2>&1; then
+    JOBS=$(sysctl -n hw.ncpu)
+else
+    JOBS=2
+fi
+# Cap to avoid thrashing
+JOBS=$(( JOBS / 2 ))
+[ "$JOBS" -lt 1 ] && JOBS=1
+# Allow override: JOBS=1 ./Kerrigan.sh DM_test
+JOBS="${JOBS_OVERRIDE:-$JOBS}"
+echo "Using ${JOBS} parallel jobs"
+
+# ---- timing helpers ----
+_t_start=""
+t_start() { _t_start=$(date +%s.%N); }
+t_end() {
+    local name="${1:-block}"
+    local end=$(date +%s.%N)
+    local elapsed
+    elapsed=$(awk "BEGIN {printf \"%.2f\", ${end} - ${_t_start}}")
+    printf '%-40s %8.2f s\n' "${name}" "${elapsed}" >&2
+}
+
 # Prefer CMake's configured build directory.  If this template is configured in
 # an unusual way, fall back to the parent of scripts/, matching overseer.sh.in.
 if [[ "$CONFIGURED_BUILD_DIR" != @* && -d "$CONFIGURED_BUILD_DIR" ]]; then
@@ -1025,6 +1051,7 @@ mkdir -p -- "$PROCESS_DIR" "$MODEL_DIR" "$LIB_DIR" "$BIN_DIR" "$OUTPUT_ROOT"
 # Always let the unchanged CMakeLists.txt finish configuration BEFORE copying
 # MG5-generated files. Configuring afterward would restore example_process's
 # CPPProcess.cc/.h and possibly contaminate the selected model sources.
+
 echo "[setup] Refreshing the existing CMake build before installing MG5 sources..."
 if ! cmake -S "$SOURCE_DIR" -B "$BUILD_DIR"; then
     echo "ERROR: CMake configuration failed; the selected model was not installed." >&2
@@ -1108,7 +1135,7 @@ cp -a -- "$initial_process/CPPProcess.h" "$PROCESS_DIR/CPPProcess.h"
 touch -- "$PROCESS_DIR/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.h"
 
 echo "[setup] Building CMake core_lib for the selected MG5 model..."
-if ! cmake --build "$BUILD_DIR" --target core_lib; then
+if ! cmake --build "$BUILD_DIR" --target core_lib -j"${JOBS}"; then
     echo "ERROR: Building core_lib failed." >&2
     exit 1
 fi
@@ -1132,13 +1159,16 @@ for sp_folder in "${subprocess_folders[@]}"; do
         PIPELINE_FAILED=1
         continue
     fi
-
+    
+    t_start
     cp -a -- "$sp_source/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.cc"
     cp -a -- "$sp_source/CPPProcess.h" "$PROCESS_DIR/CPPProcess.h"
     # cp -a preserves the old modification time; force a rebuild explicitly.
     touch -- "$PROCESS_DIR/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.h"
-
-    if ! cmake --build "$BUILD_DIR" --target sigmav; then
+    t_end "copy ${sp_source}"
+    
+    t_start
+    if ! cmake --build "$BUILD_DIR" --target sigmav -j"${JOBS}"; then
         echo "ERROR: CMake sigmav build failed for $sp_folder" >&2
         for card in "${cards[@]}"; do
             echo "$sp_folder : CMake sigmav build failed" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
@@ -1146,12 +1176,14 @@ for sp_folder in "${subprocess_folders[@]}"; do
         PIPELINE_FAILED=1
         continue
     fi
-
+    t_end "build sigmav"
+    
     if [[ ! -x "$BIN_DIR/sigmav" ]]; then
         echo "ERROR: executable not found after make sigmav: $BIN_DIR/sigmav" >&2
         exit 1
     fi
 
+    t_start
     for card in "${cards[@]}"; do
         out_dir="${CARD_OUTPUTS[$card]}"
         sigma_file="$out_dir/$sp_folder.dat"
@@ -1175,8 +1207,8 @@ for sp_folder in "${subprocess_folders[@]}"; do
         fi
         rm -f -- "$raw_file"
     done
+    t_end "running cards"
 done
-
 # ------------------------------------------------------------------------------
 # Totals + validation
 # ------------------------------------------------------------------------------

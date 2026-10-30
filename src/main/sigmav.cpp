@@ -3,48 +3,27 @@
 #include <iomanip>
 #include <string>
 #include <cmath>
-#include "CPPProcess.h"
-#include "momenta.h"
+#include "sigmav_interface.h"
 #include "tools.h"
+#include "my_boost.h"
 #include <algorithm> 
 #include <unordered_map>
-#include <boost/math/quadrature/gauss_kronrod.hpp>
-#include <boost/math/quadrature/tanh_sinh.hpp>
-#include <boost/program_options.hpp>
+#include "options.h"
 #include <gsl/gsl_sf_bessel.h>
 #include <stdexcept>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 using namespace std;
-namespace po = boost::program_options;
-
-CPPProcess process;
 
 double diff_sigma(double theta, double s){
 
-  vector<double> masses = process.getMasses();
+  vector<double> masses = sigmav_iface::getMasses();
   double sigma = 0.0;
   
-  vector<double *> ps = momenta(2,sqrt(s),masses,theta);
-
-  for(int x = 0; x<4; x++){
-    if (ps[x][0] <= 0.0){ //physical constraints
-      for (auto* ptr : ps) {
-        delete ptr;
-      }
-      ps.clear();
-      masses.clear();
-      return 0.0;
-    }
-  }
-        
-  process.setMomenta(ps);
-  sigma = process.sigmaKin(s, theta);
+  sigma = sigmav_iface::sigmaKin(s, theta);
   
-  for (auto* ptr : ps) {
-    delete ptr;
-  }
-  
-  ps.clear();
   masses.clear();
   return sigma;
 }
@@ -55,17 +34,19 @@ double sigma(double s){
   const double a = 0;  // cosθ_min
   const double b =  M_PI;  // cosθ_max
   
-  const double mi1 = process.getMasses().at(0);
-  const double mi2 = process.getMasses().at(1);
-  const double mf1 = process.getMasses().at(2);
-  const double mf2 = process.getMasses().at(3);
+  const auto& masses = sigmav_iface::getMasses();   // const&, no copy
+
+  const double mi1 = masses[0];
+  const double mi2 = masses[1];
+  const double mf1 = masses[2];
+  const double mf2 = masses[3];
+  
   double p_f, p_i, factor, error;
   
   //double integral = gauss(&diff_sigma, s, a, b, 7);
   auto f1 = [s](double theta) { return diff_sigma(theta,s); };
-  boost::math::quadrature::tanh_sinh<double> integrator;
   //double integral = integrator.integrate(f1, a,b, 1e-04);
-  double integral = boost::math::quadrature::gauss_kronrod<double, 15>::integrate(f1, a, b, 5, 1e-02, &error);
+  double integral = mb::gauss_kronrod(f1, a, b, 5, 1e-04);
   //double integral = simpson(diff_sigma, s, a, b, 1.0e-03, NULL);
   
   if (integral > 0.0) {
@@ -80,12 +61,12 @@ double sigma(double s){
 
 double diff_A(double u, double T){
   
-  vector<std::pair<double, double>> newDOF = process.getNewDOF();
-  const vector<double> newMasses = process.getNewMasses();
+  vector<std::pair<double, double>> newDOF = sigmav_iface::getNewDOF();
+  const vector<double> newMasses = sigmav_iface::getNewMasses();
   const double m1 = *std::min_element(newMasses.begin(), newMasses.end());;
   
-  const double mi1 = process.getMasses().at(0);
-  const double mi2 = process.getMasses().at(1);
+  const double mi1 = sigmav_iface::getMasses().at(0);
+  const double mi2 = sigmav_iface::getMasses().at(1);
   const double mass_ratio_cut = 100.0;  // or 1.5, 2.0, etc.
   
   //if (mi1 > mass_ratio_cut*m1 || mi2 > mass_ratio_cut*m1) return 0.0; 
@@ -132,8 +113,8 @@ double diff_A(double u, double T){
 
 double sigma_v(double T){
 
-  vector<std::pair<double, double>> newDOF = process.getNewDOF();
-  const vector<double> newMasses = process.getNewMasses();
+  vector<std::pair<double, double>> newDOF = sigmav_iface::getNewDOF();
+  const vector<double> newMasses = sigmav_iface::getNewMasses();
   const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
   const double k2_m1 = bessK2(m1/T);
   
@@ -165,85 +146,95 @@ double sigma_v(double T){
   
   auto f1 = [T](double t) { return diff_A(t,T); };
   double A = 0.0;
-  boost::math::quadrature::tanh_sinh<double> integrator;
+  //tanh_sinh<double> integrator;
   //A = integrator.integrate(f1, lim_inf, lim_sup, 1e-04);
-  A = boost::math::quadrature::gauss_kronrod<double, 15>::integrate(f1, lim_inf, lim_sup, 5, 1e-04, &error);
+  A = mb::gauss_kronrod(f1, lim_inf, lim_sup, 5, 1e-04);
   return A/den;
 }
 
 int main(int argc, char** argv){
 
-  string input_card;
-  double x0, xf, m1;
-  int N;
-  po::options_description desc{"Options"};
-  desc.add_options()
-    ("help,h", "Help screen")
-    ("neq", "Generate x vs n_equilibrium table")
-    ("input-card", po::value<string>(&input_card), "Param card to analyze")
-    ("x0", po::value<double>(&x0)->default_value(1.e-10), "Initial value for x")
-    ("xf", po::value<double>(&xf)->default_value(1.e+7), "Final value for x")
-    ("mDM,m", po::value<double>(&m1), "Mass of the dark matter candidate in GeV")
-    ("n-points,n", po::value<int>(&N)->default_value(1000), "Number of points between x0 and xf (inclusive) to be evaluated");
-    
-  po::variables_map vm;
-  po::store(po::parse_command_line(argc, argv, desc), vm);
-  po::notify(vm);
+  Options opt = parse_args(argc, argv);
 
-  if (vm.count("help"))
-    std::cout << desc << '\n';
+  string card = opt.inputFile;
+  double x0 = opt.x0, xf = opt.xf, m1 = opt.m1;
+  int N = opt.N;
   
-  if (vm.count("input-card")) {
-    std::cout << "Card: " << input_card << '\n';
-
-    std::string card = input_card;
-    process.initProc(card);
-    const vector<double> newMasses = process.getNewMasses();
-    if (!vm.count("input-card")) {
-      m1 = *std::min_element(newMasses.begin(), newMasses.end());
+  sigmav_iface::initProc(card);
+  const vector<double> newMasses = sigmav_iface::getNewMasses();
+  if (m1 < 0.0) {
+    m1 = *std::min_element(newMasses.begin(), newMasses.end());
+  }
+  
+  const double mi1 = sigmav_iface::getMasses().at(0);
+  const double mi2 = sigmav_iface::getMasses().at(1);
+  double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
+  double un, Tn, sigv_n;
+  
+  cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
+  
+  if (opt.neq) {
+    
+    const vector<std::pair<double, double>> newDOF = sigmav_iface::getNewDOF();
+    double mi, neq, k2_mi;
+    
+    cout << "# x (DM_candidate_mass/T) vs. n_equilibrium" << endl;
+    
+    for(int n = 0; n < N; n++){
+      un = ui + n*h;
+      Tn = std::exp(un);
+      neq = 0.0;
+      k2_mi = 0.0;
+      for (auto mi_gi : newDOF) {
+        mi = mi_gi.first;
+        k2_mi = bessK2(mi/Tn);
+        if (mi/Tn > 10.0 || k2_mi == 0.0) {
+          k2_mi = exp(-mi/Tn) * gsl_sf_bessel_Kn_scaled(2, mi/Tn);
+        } 
+        neq += mi_gi.second * pow(mi,2) * k2_mi;
+      }
+      neq *= Tn/(2.0*pow(M_PI,2)); 
+      cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << neq << "\n";
     }
     
-    const double mi1 = process.getMasses().at(0);
-    const double mi2 = process.getMasses().at(1);
-    double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
-    double un, Tn, sigv_n;
+  } else {
     
-    cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
-    
-    if (vm.count("neq")) {
-      
-      const vector<std::pair<double, double>> newDOF = process.getNewDOF();
-      double mi, neq, k2_mi;
-      
-      cout << "# x (DM_candidate_mass/T) vs. n_equilibrium" << endl;
-      
-      for(int n = 0; n < N; n++){
-        un = ui + n*h;
-        Tn = std::exp(un);
-        neq = 0.0;
-        k2_mi = 0.0;
-        for (auto mi_gi : newDOF) {
-          mi = mi_gi.first;
-          k2_mi = bessK2(mi/Tn);
-          if (mi/Tn > 10.0 || k2_mi == 0.0) {
-            k2_mi = exp(-mi/Tn) * gsl_sf_bessel_Kn_scaled(2, mi/Tn);
-          } 
-          neq += mi_gi.second * pow(mi,2) * k2_mi;
-        }
-        neq *= Tn/(2.0*pow(M_PI,2)); 
-        cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << neq << "\n";
-      }
-      
-    } else {
-      
-      cout << "# x (DM_candidate_mass/T) vs. sigma*v" << endl;
-      
-      for(int n = 0; n < N; n++){
-        un = ui + n*h;
-        Tn = std::exp(un);
-        sigv_n = sigma_v(Tn);
-        cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << sigv_n << "\n";
-      }
+    cout << "# x (DM_candidate_mass/T) vs. sigma*v" << endl;
+
+    // Precompute T values (cheap, avoids exp() in the parallel region)
+    std::vector<double> Ts(N);
+    for (int n = 0; n < N; n++) {
+        Ts[n] = std::exp(ui + n * h);
+    }
+
+    // Parallel evaluation of sigma_v(Ts[n])
+    std::vector<double> sigv(N, 0.0);
+
+    int n_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()) / 2);
+    if (n_threads > N) n_threads = N;
+    if (n_threads < 1) n_threads = 1;
+
+    std::cerr << "# Using " << n_threads << " threads\n";
+
+    std::atomic<int> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(n_threads);
+
+    for (int w = 0; w < n_threads; ++w) {
+        workers.emplace_back([&]() {
+            while (true) {
+                int n = next.fetch_add(1);
+                if (n >= N) break;
+                sigv[n] = sigma_v(Ts[n]);
+            }
+        });
+    }
+    for (auto& t : workers) t.join();
+
+    // Print serially — deterministic order, no cout races
+    for (int n = 0; n < N; n++) {
+        cout << setiosflags(ios::scientific) << setprecision(8)
+             << m1 / Ts[n] << " " << sigv[n] << "\n";
     }
   }
   
