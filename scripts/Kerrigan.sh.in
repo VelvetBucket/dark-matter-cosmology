@@ -2,6 +2,96 @@
 set -Eeuo pipefail
 shopt -s nullglob
 
+
+# Console policy: on success, quiet mode prints exactly one English line.
+# All detailed build/progress/timing output is retained in a persistent log.
+# --debug (or the existing --verbose-build) restores live output, including
+# CMake progress percentages, and the existing timing summary.
+# --help is always displayed normally; --dry-run has its own accurate message.
+# This wrapper does not change subprocess selection, rebuilding, or physics.
+if [[ "${KERRIGAN_CONSOLE_CHILD:-0}" != "1" ]]; then
+    kerrigan_show_details=0
+    kerrigan_help=0
+    kerrigan_dry_run=0
+    kerrigan_argv=()
+    for kerrigan_arg in "$@"; do
+        case "$kerrigan_arg" in
+            --debug)
+                kerrigan_show_details=1
+                ;;
+            --verbose-build)
+                kerrigan_show_details=1
+                kerrigan_argv+=("$kerrigan_arg")
+                ;;
+            -h|--help)
+                kerrigan_help=1
+                kerrigan_argv+=("$kerrigan_arg")
+                ;;
+            --dry-run)
+                kerrigan_dry_run=1
+                kerrigan_argv+=("$kerrigan_arg")
+                ;;
+            *)
+                kerrigan_argv+=("$kerrigan_arg")
+                ;;
+        esac
+    done
+
+    # Also permit enabling debug when invoked indirectly by UI2, which does
+    # not expose Kerrigan's --debug option directly.
+    if [[ "${KERRIGAN_DEBUG:-0}" == "1" || "${KERRIGAN_VERBOSE_BUILD:-0}" == "1" ]]; then
+        kerrigan_show_details=1
+    fi
+
+    # Preserve help/debug functionality without forwarding --debug to the
+    # original option parser. Existing --verbose-build also implies debug.
+    if (( kerrigan_help || kerrigan_show_details )); then
+        if (( kerrigan_show_details )); then
+            export KERRIGAN_VERBOSE_BUILD=1
+        fi
+        export KERRIGAN_CONSOLE_CHILD=1
+        exec bash "${BASH_SOURCE[0]}" "${kerrigan_argv[@]}"
+    fi
+
+    # CMake populates the configured path in the installed build/scripts file.
+    # The log directory can be customized without changing source or CMake.
+    kerrigan_configured_build="@CMAKE_BINARY_DIR@"
+    if [[ "$kerrigan_configured_build" == @* ]]; then
+        kerrigan_configured_build="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+    fi
+    kerrigan_log_dir="${KERRIGAN_LOG_DIR:-$kerrigan_configured_build/output/kerrigan_diagnostics}"
+    if ! mkdir -p -- "$kerrigan_log_dir"; then
+        printf 'ERROR: Cannot create Kerrigan diagnostic log directory: %s\n' "$kerrigan_log_dir" >&2
+        exit 1
+    fi
+    if ! kerrigan_run_log="$(mktemp "$kerrigan_log_dir/kerrigan_$(date +%Y%m%d_%H%M%S)_XXXXXX.log")"; then
+        printf 'ERROR: Cannot create Kerrigan diagnostic log in: %s\n' "$kerrigan_log_dir" >&2
+        exit 1
+    fi
+
+    if KERRIGAN_CONSOLE_CHILD=1 bash "${BASH_SOURCE[0]}" "${kerrigan_argv[@]}" >"$kerrigan_run_log" 2>&1; then
+        if (( kerrigan_dry_run )); then
+            printf 'Kerrigan dry run completed successfully\n'
+        else
+            printf 'Kerrigan completed successfully\n'
+        fi
+        exit 0
+    else
+        kerrigan_exit_code=$?
+        # Failure is NEVER reported as success. Surface a useful error and
+        # retain the complete diagnostic trace without flooding the user.
+        kerrigan_last_error="$(grep -E '(^|[[:space:]])ERROR:' "$kerrigan_run_log" | tail -n 1 || true)"
+        if [[ -n "$kerrigan_last_error" ]]; then
+            printf '%s\n' "$kerrigan_last_error" >&2
+        else
+            printf 'Kerrigan failed; last diagnostic lines:\n' >&2
+            tail -n 8 "$kerrigan_run_log" >&2 || true
+        fi
+        printf 'Kerrigan failed (exit code %s). Diagnostic log: %s\n' "$kerrigan_exit_code" "$kerrigan_run_log" >&2
+        exit "$kerrigan_exit_code"
+    fi
+fi
+
 # ==============================================================================
 # Kerrigan.sh.in
 #
@@ -16,8 +106,10 @@ shopt -s nullglob
 #       - for each selected SubProcess, copy CPPProcess.cc/.h;
 #       - rebuild bin/sigmav;
 #       - run sigmav for the selected parameter card(s);
-#       - leave neq.dat/relic-density work paused;
-#       - sum the individual sigmaV files into TOTALS_T.dat.
+#       - expose three independent operations: sigmavh, sigmavf, neq;
+#       - for neq, build one subprocess and generate one table per card;
+#       - leave the full relic-density solver/evolution paused;
+#       - sum subprocess sigma-v files only for sigmavh or sigmavf.
 #   * Never hard-code a user's absolute filesystem path.
 #   * Never overwrite a previous physics run.
 #
@@ -111,11 +203,16 @@ SELECTION_REPORT="${KERRIGAN_SELECTION_REPORT:-}"
 PROCESS_SELECTOR="${KERRIGAN_PROCESS_SELECTOR:-}"
 OUTPUT_ROOT="${KERRIGAN_OUTPUT_ROOT:-$OUTPUT_ROOT_DEFAULT}"
 ALLOWED_PARTICLES_FILE="${KERRIGAN_ALLOWED_PARTICLES:-}"
-SIGMAV_PROFILE="history"
+# Legacy UI2 compatibility: its --task sigmav plus --sigmav-profile maps to
+# the new single task flag. The user-facing interface has only three tasks.
+LEGACY_GENERATE_NEQ="${KERRIGAN_GENERATE_NEQ:-0}"
+LEGACY_PROFILE="history"
+LEGACY_PROFILE_SET=0
 X_FREEZEOUT="15"
 X_START_INPUT=""
 X_END_INPUT=""
 N_POINTS="1000"
+BUILD_OUTPUT_VERBOSE="${KERRIGAN_VERBOSE_BUILD:-0}"
 DRY_RUN=0
 
 usage() {
@@ -125,9 +222,9 @@ Usage:
   ./scripts/Kerrigan.sh --selection-report /path/to/UI2_selection.json [options]
 
 Examples (run from the configured CMake build directory):
-  ./scripts/Kerrigan.sh input/example/cards/example_card.dat --task sigmav --dry-run
-  ./scripts/Kerrigan.sh example_card.dat --variant example --task sigmav
-  ./scripts/Kerrigan.sh --selection-report /path/to/UI2_selection.json --task sigmav
+  ./scripts/Kerrigan.sh input/example/cards/example_card.dat --task sigmavh --dry-run
+  ./scripts/Kerrigan.sh example_card.dat --variant example --candidate-pdg 1012 --task sigmavf
+  ./scripts/Kerrigan.sh --selection-report /path/to/UI2_selection.json --task neq
   ./scripts/Kerrigan.sh /path/to/custom.dat --mg5-output /path/to/standalone \
       --cards-dir /path/to/cards --process-selector '^P' --output-root /tmp/results
 
@@ -143,9 +240,12 @@ Options:
   --cards-dir DIR            Resolve bare card names/globs under this directory.
   --mg5-output NAME|PATH     Override the auto-detected MG5 standalone output.
   --variant NAME             Identify a model variant; also accepts --model.
-  --task sigmav             Sigma-v only. Relic density remains paused.
-  --sigmav-profile NAME     history (default) or freezeout.
-  --x-freezeout X           Reference x_FO for freezeout profile; default 15.
+   --task TASK               sigmavh (default), sigmavf, or neq.
+                             sigmavh: sigma-v over a broad historical x interval.
+                             sigmavf: sigma-v near freeze-out.
+                             neq: equilibrium number density only; no sigma-v sum.
+                             Relic-density evolution remains unavailable.
+   --x-freezeout X           Freeze-out reference x_FO; default 15 (sigmavf).
   --x-start X               Custom initial x=mDM/T.
   --x-end X                 Custom final x=mDM/T.
   --n-points N              Number of x values; default 1000.
@@ -157,6 +257,8 @@ Options:
                             provides this via KERRIGAN_PROCESS_SELECTOR.
   --output-root DIR         Root for run outputs. Default: $OUTPUT_ROOT_DEFAULT
   --allowed-particles FILE  Fallback Overseer-style particle-token filter.
+  --debug                   Show all detailed output, CMake progress, and timings.
+  --verbose-build           Show CMake build progress (normally logged only).
   --dry-run                 Resolve paths/cards/processes but run no calculation.
   -h, --help                Show this help.
 
@@ -248,9 +350,14 @@ while [[ $# -gt 0 ]]; do
             ALLOWED_PARTICLES_FILE="$2"
             shift 2
             ;;
+        --generate-neq)
+            echo "ERROR: --generate-neq has been replaced by the independent --task neq." >&2
+            exit 2 ;;
         --sigmav-profile|--profile)
+            # Accepted temporarily for earlier UI2 versions. New integrations
+            # should send only --task sigmavh or --task sigmavf.
             [[ $# -ge 2 ]] || { echo "ERROR: --sigmav-profile needs a value" >&2; exit 2; }
-            SIGMAV_PROFILE="$2"; shift 2 ;;
+            LEGACY_PROFILE="$2"; LEGACY_PROFILE_SET=1; shift 2 ;;
         --x-freezeout)
             [[ $# -ge 2 ]] || { echo "ERROR: --x-freezeout needs a value" >&2; exit 2; }
             X_FREEZEOUT="$2"; shift 2 ;;
@@ -263,6 +370,8 @@ while [[ $# -gt 0 ]]; do
         --n-points)
             [[ $# -ge 2 ]] || { echo "ERROR: --n-points needs a value" >&2; exit 2; }
             N_POINTS="$2"; shift 2 ;;
+        --verbose-build)
+            BUILD_OUTPUT_VERBOSE=1; shift ;;
         --dry-run)
             DRY_RUN=1
             shift
@@ -296,18 +405,10 @@ PY_CARDS
 )"
 fi
 
-case "${TASK_INPUT,,}" in
-    ""|sigmav|sigma_v|sigma-v|sigma)
-        TASK="sigmav"
-        ;;
-    relic|relic_density|relic-density|density)
-        echo "ERROR: Relic-density calculations are paused; choose --task sigmav." >&2
-        exit 2
-        ;;
-    *)
-        echo "ERROR: task must be 'relic' or 'sigmav' (got '$TASK_INPUT')." >&2
-        exit 2
-        ;;
+# Validate legacy flag removal before any model files are changed.
+case "${LEGACY_GENERATE_NEQ,,}" in
+    0|false|no|off|"") ;;
+    *) echo "ERROR: KERRIGAN_GENERATE_NEQ is obsolete; use --task neq." >&2; exit 2 ;;
 esac
 
 # Validate numerical bounds before touching generated artifacts.
@@ -668,14 +769,62 @@ fi
 MODE="${MODE_INPUT:-$REPORT_MODE}"
 CANDIDATE="${CANDIDATE_INPUT:-$REPORT_CANDIDATE}"
 CANDIDATE_PDG="${CANDIDATE_PDG_INPUT:-$REPORT_CANDIDATE_PDG}"
-if [[ -z "$TASK_INPUT" && -n "$REPORT_TASK" ]]; then
-    case "${REPORT_TASK,,}" in
-        relic|relic_density|relic-density|density)
-            # Relic remains paused. Only explicit --task relic opts into it.
-            TASK="sigmav" ;;
-        sigmav|sigma_v|sigma-v|sigma) TASK="sigmav" ;;
+# New public API: a single task selects the requested physical output.
+# Legacy UI2 calls remain supported for staged deployment.
+TASK_REQUEST="${TASK_INPUT:-$REPORT_TASK}"
+case "${TASK_REQUEST,,}" in
+    ""|sigmavh|sigma-v-history) TASK="sigmavh" ;;
+    sigmavf|sigma-v-freezeout) TASK="sigmavf" ;;
+    neq|equilibrium|equilibrium-density) TASK="neq" ;;
+    sigmav|sigma_v|sigma-v|sigma)
+        # Earlier UI2 passes --task sigmav --sigmav-profile history|freezeout.
+        case "${LEGACY_PROFILE,,}" in
+            history) TASK="sigmavh" ;;
+            freezeout) TASK="sigmavf" ;;
+            *) echo "ERROR: Legacy sigmav profile must be history or freezeout." >&2; exit 2 ;;
+        esac ;;
+    relic|relic_density|relic-density|density)
+        echo "ERROR: Relic-density evolution remains paused. Use --task neq to prepare equilibrium-density data." >&2
+        exit 2 ;;
+    *) echo "ERROR: Invalid task '$TASK_REQUEST'. Choose sigmavh, sigmavf, or neq." >&2; exit 2 ;;
+esac
+if [[ "$LEGACY_PROFILE_SET" -eq 1 ]]; then
+    case "${LEGACY_PROFILE,,}" in
+        history|freezeout) ;;
+        *) echo "ERROR: --sigmav-profile must be history or freezeout." >&2; exit 2 ;;
     esac
+    if [[ "${TASK_REQUEST,,}" != sigmav && "${TASK_REQUEST,,}" != sigma_v &&           "${TASK_REQUEST,,}" != sigma-v && "${TASK_REQUEST,,}" != sigma ]]; then
+        echo "ERROR: Do not combine --sigmav-profile with --task $TASK. Select the task directly." >&2
+        exit 2
+    fi
 fi
+
+# All three tasks use the same configurable x grid. For neq, use the broad
+# historical grid by default; it can be overridden for a particular scan.
+mapfile -t GRID_SETTINGS < <(python3 - "$TASK" "$X_FREEZEOUT" "$X_START_INPUT" "$X_END_INPUT" "$N_POINTS" <<'PY_GRID'
+import math, sys
+operation, freeze, start, end, n = sys.argv[1:]
+try:
+    f = float(freeze)
+    if not math.isfinite(f) or f <= 0:
+        raise ValueError('x-freezeout must be finite and positive')
+    s = float(start) if start else (f/10 if operation == 'sigmavf' else 1e-10)
+    e = float(end) if end else (f*10 if operation == 'sigmavf' else 1e7)
+    n = int(n)
+    if not (math.isfinite(s) and math.isfinite(e) and 0 < s < e and 2 <= n <= 1000000):
+        raise ValueError('expected finite 0 < x-start < x-end and 2 <= n-points <= 1000000')
+    print(f'{s:.17g}')
+    print(f'{e:.17g}')
+    print(n)
+except (ValueError, OverflowError) as ex:
+    print(f'ERROR: Invalid calculation grid: {ex}', file=sys.stderr)
+    sys.exit(2)
+PY_GRID
+)
+[[ ${#GRID_SETTINGS[@]} -eq 3 ]] || { echo 'ERROR: Invalid calculation grid.' >&2; exit 2; }
+X_START="${GRID_SETTINGS[0]}"
+X_END="${GRID_SETTINGS[1]}"
+N_POINTS="${GRID_SETTINGS[2]}"
 
 MODE="${MODE,,}"
 if [[ -z "$MODE" ]]; then
@@ -693,7 +842,7 @@ if [[ -z "$CARD_SPEC" ]]; then
         CARD_SPEC="$REPORT_CARD_PATH"
     else
         echo "ERROR: Specify a parameter card or --selection-report from UI2." >&2
-        echo "Example: scripts/Kerrigan.sh input/example/cards/example_card.dat --task sigmav" >&2
+        echo "Example: scripts/Kerrigan.sh input/example/cards/example_card.dat --task sigmavh" >&2
         exit 2
     fi
 fi
@@ -879,16 +1028,16 @@ sys.exit(1)
 PY_MDM
 }
 
-# Keep sigma-v outputs as two numerical columns. The new C++ program prints a
-# nonnumeric 'Card: ...' line to stdout. Strip it, validate the grid, and
-# normalize x coordinates for reliable process-by-process totals.
-normalize_sigmav_table() {
-    local raw="$1" destination="$2"
-    python3 - "$raw" "$destination" "$X_START" "$X_END" "$N_POINTS" <<'PY_NORMALIZE'
+# The current sigmav executable writes sigma-v OR --neq tables to stdout,
+# including a nonnumeric 'Card: ...' heading. Normalize either table to two
+# numerical columns on the SAME x-grid, rejecting malformed/incomplete data.
+normalize_grid_table() {
+    local raw="$1" destination="$2" kind="$3"
+    python3 - "$raw" "$destination" "$X_START" "$X_END" "$N_POINTS" "$kind" <<'PY_NORMALIZE'
 import math, sys
 from pathlib import Path
 raw, dest = Path(sys.argv[1]), Path(sys.argv[2])
-x0, xf, n = float(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5])
+x0, xf, n, kind = float(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
 rows = []
 for number, line in enumerate(raw.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
     s = line.strip()
@@ -896,19 +1045,19 @@ for number, line in enumerate(raw.read_text(encoding='utf-8', errors='replace').
         continue
     fields = s.split()
     if len(fields) != 2:
-        raise ValueError(f'Unexpected sigma-v stdout at line {number}: {s[:100]}')
+        raise ValueError(f'Unexpected {kind} stdout at line {number}: {s[:100]}')
     x, y = float(fields[0]), float(fields[1])
     if not (math.isfinite(x) and math.isfinite(y)):
-        raise ValueError(f'Non-finite sigma-v values at line {number}')
+        raise ValueError(f'Non-finite {kind} values at line {number}')
     rows.append((x,y))
 if len(rows) != n:
-    raise ValueError(f'Expected {n} sigma-v samples, got {len(rows)}')
+    raise ValueError(f'Expected {n} {kind} samples, got {len(rows)}')
 step = math.log(xf/x0)/(n-1)
 with dest.open('w', encoding='utf-8') as handle:
     for index,(observed,y) in enumerate(rows):
         expected = x0 * math.exp(index*step)
         if not math.isclose(observed, expected, rel_tol=5e-6, abs_tol=1e-11*expected):
-            raise ValueError(f'Unexpected sigma-v x grid at index {index}: {observed} != {expected}')
+            raise ValueError(f'Unexpected {kind} x grid at index {index}: {observed} != {expected}')
         handle.write(f'{expected:.8e} {y:.8e}\n')
 PY_NORMALIZE
 }
@@ -926,10 +1075,11 @@ else
     CANDIDATE_LABEL="$(sanitize_label "$CANDIDATE")"
 fi
 
-TASK_LABEL="$(sanitize_label "${TASK}_${SIGMAV_PROFILE}")"
+# The requested output is explicit in the run directory. The relic-density
+# solver is intentionally not exposed by Kerrigan.
+TASK_LABEL="$(sanitize_label "$TASK")"
 
 declare -A CARD_OUTPUTS=()
-declare -A CARD_NEQ_DONE=()
 
 for card in "${cards[@]}"; do
     card_stem="$(basename -- "$card")"
@@ -949,7 +1099,15 @@ for card in "${cards[@]}"; do
     fi
 
     CARD_OUTPUTS["$card"]="$out_dir"
-    CARD_NEQ_DONE["$card"]=0
+done
+
+declare -A CARD_DM_MASSES=()
+for card in "${cards[@]}"; do
+    if ! mass="$(resolve_candidate_mass "$card" "$CANDIDATE_PDG")"; then
+        echo "ERROR: Could not obtain DM mass for $card (PDG $CANDIDATE_PDG)." >&2
+        exit 1
+    fi
+    CARD_DM_MASSES["$card"]="$mass"
 done
 
 declare -A CARD_DM_MASSES=()
@@ -976,7 +1134,8 @@ echo "Build directory    : $BUILD_DIR"
 echo "Cards directory    : $CARDS_DIR"
 echo "UI2 report         : ${SELECTION_REPORT:-none (manual run)}"
 echo "Output root        : $OUTPUT_ROOT"
-echo "Task               : $TASK ($SIGMAV_PROFILE)"
+echo "Task               : $TASK"
+echo "Relic-density solver: not executed"
 echo "Sigma-v x interval : $X_START .. $X_END ($N_POINTS samples)"
 echo "Selection mode     : $MODE"
 echo "Candidate          : $CANDIDATE${CANDIDATE_PDG:+ (PDG $CANDIDATE_PDG)}"
@@ -992,6 +1151,48 @@ if [[ $DRY_RUN -eq 1 ]]; then
     echo "Dry run complete: no output, model, library or process file was modified."
     exit 0
 fi
+
+# Diagnostics are separate from physics output and never overwrite earlier runs.
+DIAG_DIR="$OUTPUT_ROOT/${MODEL_VARIANT:-manual}/diagnostics/${RUN_STAMP}"
+mkdir -p -- "$DIAG_DIR"
+BUILD_LOG="$DIAG_DIR/cmake_build.log"
+TIMING_LOG="$DIAG_DIR/timings.tsv"
+: > "$BUILD_LOG"
+printf 'stage\tprocess\tcard\tmilliseconds\n' > "$TIMING_LOG"
+
+now_ns() { date +%s%N; }
+record_timing() {
+    local stage="$1" process="$2" card="$3" start="$4"
+    local end delta_ms
+    end="$(now_ns)"
+    delta_ms=$(( (end - start + 500000) / 1000000 ))
+    printf '%s\t%s\t%s\t%s\n' "$stage" "$process" "$card" "$delta_ms" >> "$TIMING_LOG"
+}
+
+# The compiler's progress is diagnostic information, not end-user output.
+# Preserve every line in a separate file and expose it only on explicit request,
+# or show the latest errors when the build fails.
+timed_cmake() {
+    local stage="$1" channel="$2" start rc=0
+    shift 2
+    start="$(now_ns)"
+    printf '\n=== %s (%s) ===\n' "$stage" "$channel" >> "$BUILD_LOG"
+    if [[ "$BUILD_OUTPUT_VERBOSE" == "1" ]]; then
+        "$@" 2>&1 | tee -a "$BUILD_LOG" || rc=$?
+    else
+        "$@" >> "$BUILD_LOG" 2>&1 || rc=$?
+    fi
+    record_timing "$stage" "$channel" "-" "$start"
+    if [[ $rc -ne 0 ]]; then
+        echo "ERROR: $stage failed for $channel. See $BUILD_LOG" >&2
+        tail -n 35 "$BUILD_LOG" >&2
+    fi
+    return "$rc"
+}
+
+KERRIGAN_TIMER_START="$(now_ns)"
+echo "[diagnostics] Build output: $BUILD_LOG"
+echo "[diagnostics] Detailed timings: $TIMING_LOG"
 
 # CMakeLists.txt is intentionally unchanged. It discovers process_files/src
 # files while configuring and initially seeds them from example_process/src.
@@ -1026,7 +1227,7 @@ mkdir -p -- "$PROCESS_DIR" "$MODEL_DIR" "$LIB_DIR" "$BIN_DIR" "$OUTPUT_ROOT"
 # MG5-generated files. Configuring afterward would restore example_process's
 # CPPProcess.cc/.h and possibly contaminate the selected model sources.
 echo "[setup] Refreshing the existing CMake build before installing MG5 sources..."
-if ! cmake -S "$SOURCE_DIR" -B "$BUILD_DIR"; then
+if ! timed_cmake cmake_configure - cmake -S "$SOURCE_DIR" -B "$BUILD_DIR"; then
     echo "ERROR: CMake configuration failed; the selected model was not installed." >&2
     exit 1
 fi
@@ -1039,9 +1240,12 @@ for card in "${cards[@]}"; do
     card_stem="${card_stem%.dat}"
 
     mkdir -p -- "$out_dir"
-    : > "$out_dir/.sigmav_files.list"
     : > "$out_dir/failed_processes.txt"
+    if [[ "$TASK" != "neq" ]]; then
+        : > "$out_dir/.sigmav_files.list"
+    fi
 
+    # Keep selection provenance. neq executes only the first validated process.
     printf '%s\n' "${subprocess_folders[@]}" > "$out_dir/selected_processes.txt"
 
     if [[ -n "$SELECTION_REPORT" && -f "$SELECTION_REPORT" ]]; then
@@ -1055,7 +1259,9 @@ mode=$MODE
 candidate=$CANDIDATE
 candidate_pdg=$CANDIDATE_PDG
 task=$TASK
-sigmav_profile=$SIGMAV_PROFILE
+relic_density_solver_executed=false
+neq_requested=$([[ "$TASK" == "neq" ]] && echo true || echo false)
+sigmav_profile=$([[ "$TASK" == "sigmavf" ]] && echo freezeout || ([[ "$TASK" == "sigmavh" ]] && echo history || echo none))
 x_start=$X_START
 x_end=$X_END
 n_points=$N_POINTS
@@ -1075,7 +1281,8 @@ done
 # Overseer execution engine: model/lib -> model build -> per-process sigmav
 # ------------------------------------------------------------------------------
 
-echo "[setup] Copying real MadGraph model sources..."
+echo "[setup] Installing generated MadGraph sources..."
+COPY_START="$(now_ns)"
 safe_clear_directory "$MODEL_DIR"
 cp -a -- "$MG5_OUTPUT_FOLDER/src/." "$MODEL_DIR/"
 
@@ -1086,6 +1293,8 @@ if [[ -d "$MG5_OUTPUT_FOLDER/lib" ]]; then
 else
     echo "WARNING: $MG5_OUTPUT_FOLDER/lib does not exist; keeping current build/lib." >&2
 fi
+
+record_timing copy_model_sources - - "$COPY_START"
 
 # IMPORTANT: CMake's 'model' target runs UI1 and MadGraph generation; it does
 # not build a model library. Compile its existing core_lib target instead.
@@ -1108,114 +1317,202 @@ cp -a -- "$initial_process/CPPProcess.h" "$PROCESS_DIR/CPPProcess.h"
 touch -- "$PROCESS_DIR/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.h"
 
 echo "[setup] Building CMake core_lib for the selected MG5 model..."
-if ! cmake --build "$BUILD_DIR" --target core_lib; then
+if ! timed_cmake core_lib_build - cmake --build "$BUILD_DIR" --target core_lib; then
     echo "ERROR: Building core_lib failed." >&2
     exit 1
 fi
 
-sp_number=${#subprocess_folders[@]}
-sp_index=0
+# Both physics operations use the first compiled CPPProcess. For neq, this is
+# sufficient because equilibrium density is model/card-dependent and does NOT
+# need to be recalculated for each annihilation final state.
 PIPELINE_FAILED=0
-
-for sp_folder in "${subprocess_folders[@]}"; do
-    ((++sp_index))
-    sp_source="$SUBPROCESSES_DIR/$sp_folder"
-
-    echo ""
-    echo "[$sp_index/$sp_number] $sp_folder"
-
-    if [[ ! -f "$sp_source/CPPProcess.cc" || ! -f "$sp_source/CPPProcess.h" ]]; then
-        echo "ERROR: CPPProcess.cc/.h missing in $sp_source" >&2
-        for card in "${cards[@]}"; do
-            echo "$sp_folder : missing CPPProcess files" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
-        done
-        PIPELINE_FAILED=1
-        continue
-    fi
-
-    cp -a -- "$sp_source/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.cc"
-    cp -a -- "$sp_source/CPPProcess.h" "$PROCESS_DIR/CPPProcess.h"
-    # cp -a preserves the old modification time; force a rebuild explicitly.
-    touch -- "$PROCESS_DIR/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.h"
-
-    if ! cmake --build "$BUILD_DIR" --target sigmav; then
-        echo "ERROR: CMake sigmav build failed for $sp_folder" >&2
-        for card in "${cards[@]}"; do
-            echo "$sp_folder : CMake sigmav build failed" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
-        done
-        PIPELINE_FAILED=1
-        continue
-    fi
-
-    if [[ ! -x "$BIN_DIR/sigmav" ]]; then
-        echo "ERROR: executable not found after make sigmav: $BIN_DIR/sigmav" >&2
+if [[ "$TASK" == "neq" ]]; then
+    neq_process="$(basename -- "$initial_process")"
+    if ! timed_cmake neq_single_build "$neq_process" cmake --build "$BUILD_DIR" --target sigmav; then
+        echo "ERROR: Could not compile the equilibrium-density executable." >&2
         exit 1
     fi
-
+    if [[ ! -x "$BIN_DIR/sigmav" ]]; then
+        echo "ERROR: Executable missing: $BIN_DIR/sigmav" >&2
+        exit 1
+    fi
     for card in "${cards[@]}"; do
         out_dir="${CARD_OUTPUTS[$card]}"
-        sigma_file="$out_dir/$sp_folder.dat"
-
-        raw_file="$out_dir/.${sp_folder}.stdout.tmp"
-        if "$BIN_DIR/sigmav" --input-card "$card" --mDM "${CARD_DM_MASSES[$card]}" \
+        raw_file="$out_dir/.neq.stdout.tmp"
+        neq_file="$out_dir/neq.dat"
+        NEQ_START="$(now_ns)"
+        if "$BIN_DIR/sigmav" --neq --input-card "$card" --mDM "${CARD_DM_MASSES[$card]}" \
               --x0 "$X_START" --xf "$X_END" --n-points "$N_POINTS" > "$raw_file"; then
-            if normalize_sigmav_table "$raw_file" "$sigma_file"; then
-                printf '%s\n' "$sigma_file" >> "$out_dir/.sigmav_files.list"
-            else
-                echo "ERROR: Invalid sigma-v data for $sp_folder / $(basename -- "$card")" >&2
-                echo "$sp_folder : invalid sigma-v data" >> "$out_dir/failed_processes.txt"
-                rm -f -- "$sigma_file"
+            if ! normalize_grid_table "$raw_file" "$neq_file" "equilibrium-density"; then
+                echo "ERROR: Invalid equilibrium-density data for $(basename -- "$card")" >&2
+                echo "$neq_process : invalid equilibrium-density data" >> "$out_dir/failed_processes.txt"
+                rm -f -- "$neq_file"
                 PIPELINE_FAILED=1
             fi
         else
-            echo "ERROR: sigmav failed for $sp_folder / $(basename -- "$card")" >&2
-            echo "$sp_folder : sigmav failed" >> "$out_dir/failed_processes.txt"
-            rm -f -- "$sigma_file"
+            echo "ERROR: sigmav --neq failed for $(basename -- "$card")" >&2
+            echo "$neq_process : sigmav --neq failed" >> "$out_dir/failed_processes.txt"
+            rm -f -- "$neq_file"
             PIPELINE_FAILED=1
         fi
+        record_timing neq_compute "$neq_process" "$(basename -- "$card")" "$NEQ_START"
         rm -f -- "$raw_file"
     done
-done
+else
+    sp_number=${#subprocess_folders[@]}
+    sp_index=0
+    for sp_folder in "${subprocess_folders[@]}"; do
+        ((++sp_index))
+        sp_source="$SUBPROCESSES_DIR/$sp_folder"
+
+        if [[ "$BUILD_OUTPUT_VERBOSE" == "1" ]]; then
+            echo ""
+            echo "[$sp_index/$sp_number] $sp_folder"
+        else
+            echo "[progress] Process $sp_index/$sp_number"
+        fi
+
+        if [[ ! -f "$sp_source/CPPProcess.cc" || ! -f "$sp_source/CPPProcess.h" ]]; then
+            echo "ERROR: CPPProcess.cc/.h missing in $sp_source" >&2
+            for card in "${cards[@]}"; do
+                echo "$sp_folder : missing CPPProcess files" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
+            done
+            PIPELINE_FAILED=1
+            continue
+        fi
+
+        cp -a -- "$sp_source/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.cc"
+        cp -a -- "$sp_source/CPPProcess.h" "$PROCESS_DIR/CPPProcess.h"
+        touch -- "$PROCESS_DIR/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.h"
+
+        if ! timed_cmake process_build "$sp_folder" cmake --build "$BUILD_DIR" --target sigmav; then
+            echo "ERROR: CMake sigmav build failed for $sp_folder" >&2
+            for card in "${cards[@]}"; do
+                echo "$sp_folder : CMake sigmav build failed" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
+            done
+            PIPELINE_FAILED=1
+            continue
+        fi
+
+        if [[ ! -x "$BIN_DIR/sigmav" ]]; then
+            echo "ERROR: executable not found after building sigmav: $BIN_DIR/sigmav" >&2
+            exit 1
+        fi
+
+        for card in "${cards[@]}"; do
+            out_dir="${CARD_OUTPUTS[$card]}"
+            sigma_file="$out_dir/$sp_folder.dat"
+            raw_file="$out_dir/.${sp_folder}.stdout.tmp"
+            COMPUTE_START="$(now_ns)"
+            if "$BIN_DIR/sigmav" --input-card "$card" --mDM "${CARD_DM_MASSES[$card]}" \
+                  --x0 "$X_START" --xf "$X_END" --n-points "$N_POINTS" > "$raw_file"; then
+                if normalize_grid_table "$raw_file" "$sigma_file" "sigma-v"; then
+                    printf '%s\n' "$sigma_file" >> "$out_dir/.sigmav_files.list"
+                else
+                    echo "ERROR: Invalid sigma-v data for $sp_folder / $(basename -- "$card")" >&2
+                    echo "$sp_folder : invalid sigma-v data" >> "$out_dir/failed_processes.txt"
+                    rm -f -- "$sigma_file"
+                    PIPELINE_FAILED=1
+                fi
+            else
+                echo "ERROR: sigmav failed for $sp_folder / $(basename -- "$card")" >&2
+                echo "$sp_folder : sigmav failed" >> "$out_dir/failed_processes.txt"
+                rm -f -- "$sigma_file"
+                PIPELINE_FAILED=1
+            fi
+            record_timing sigmav_compute "$sp_folder" "$(basename -- "$card")" "$COMPUTE_START"
+            rm -f -- "$raw_file"
+        done
+    done
+fi
 
 # ------------------------------------------------------------------------------
-# Totals + validation
+# Validate and summarize the requested operation; neq must never generate
+# TOTALS_T.dat, and sigma-v tasks must never generate neq.dat.
 # ------------------------------------------------------------------------------
-
-echo ""
-echo "======================================================================"
-echo "KERRIGAN: calculating TOTALS_T.dat"
-echo "======================================================================"
 
 for card in "${cards[@]}"; do
     out_dir="${CARD_OUTPUTS[$card]}"
-
-    if ! aggregate_totals "$out_dir"; then
-        PIPELINE_FAILED=1
-        continue
+    successful_count=0
+    if [[ "$TASK" == "neq" ]]; then
+        if [[ ! -s "$out_dir/neq.dat" ]]; then
+            echo "ERROR: neq.dat is missing or empty for $card" >&2
+            PIPELINE_FAILED=1
+        fi
+    else
+        TOTALS_START="$(now_ns)"
+        if ! aggregate_totals "$out_dir"; then
+            PIPELINE_FAILED=1
+        fi
+        record_timing totals_aggregation - "$(basename -- "$card")" "$TOTALS_START"
+        successful_count="$(wc -l < "$out_dir/.sigmav_files.list" | tr -d ' ')"
+        if [[ "$successful_count" -ne "${#subprocess_folders[@]}" ]]; then
+            echo "ERROR: Not all selected subprocesses succeeded for $card ($successful_count/${#subprocess_folders[@]})." >&2
+            PIPELINE_FAILED=1
+        fi
     fi
-
-    if [[ "$TASK" == "relic" && ! -s "$out_dir/neq.dat" ]]; then
-        echo "ERROR: relic task requested but neq.dat is missing in $out_dir." >&2
-        PIPELINE_FAILED=1
-    fi
-
-    successful_count="$(wc -l < "$out_dir/.sigmav_files.list" | tr -d ' ')"
     failed_count="$(grep -cve '^[[:space:]]*$' "$out_dir/failed_processes.txt" || true)"
+    if [[ "$failed_count" -ne 0 ]]; then
+        PIPELINE_FAILED=1
+    fi
 
+    card_complete=0
+    if [[ "$failed_count" -eq 0 ]]; then
+        if [[ "$TASK" == "neq" && -s "$out_dir/neq.dat" ]]; then
+            card_complete=1
+        elif [[ "$TASK" != "neq" && -s "$out_dir/TOTALS_T.dat" &&
+                "$successful_count" -eq "${#subprocess_folders[@]}" ]]; then
+            card_complete=1
+        fi
+    fi
     cat >> "$out_dir/run_metadata.txt" <<EOF_META_END
 successful_process_count=$successful_count
 failed_process_count=$failed_count
-status=$([[ $failed_count -eq 0 ]] && echo complete || echo incomplete)
+status=$([[ "$card_complete" -eq 1 ]] && echo complete || echo incomplete)
 EOF_META_END
 
     echo "Card               : $(basename -- "$card")"
     echo "Output             : $out_dir"
-    echo "sigmaV files       : $successful_count"
-    echo "TOTALS_T.dat       : $out_dir/TOTALS_T.dat"
-    echo "neq.dat            : not requested (relic paused)"
-    echo "Failed processes   : $failed_count"
+    if [[ "$TASK" == "neq" ]]; then
+        echo "neq.dat            : $out_dir/neq.dat"
+    else
+        echo "sigmaV files       : $successful_count"
+        echo "TOTALS_T.dat       : $out_dir/TOTALS_T.dat"
+    fi
+    echo "Failed operations  : $failed_count"
     echo ""
 done
+
+record_timing kerrigan_total - - "$KERRIGAN_TIMER_START"
+
+# A compact user-facing report replaces hundreds of build-percentage lines.
+python3 - "$TIMING_LOG" <<'PY_TIMING_SUMMARY'
+import csv, sys
+from collections import defaultdict
+from pathlib import Path
+p = Path(sys.argv[1])
+values = defaultdict(list)
+with p.open(encoding="utf-8", newline="") as fh:
+    for row in csv.DictReader(fh, delimiter="\t"):
+        values[row["stage"]].append(int(row["milliseconds"]))
+print("\nKERRIGAN TIMING SUMMARY (wall time)")
+print("-" * 67)
+labels = [
+    ("cmake_configure", "CMake configure"),
+    ("copy_model_sources", "Install model sources"),
+    ("core_lib_build", "Initial core_lib build"),
+    ("process_build", "All per-process builds"),
+    ("sigmav_compute", "All sigma-v calculations"),
+    ("neq_compute", "Equilibrium-density calculations"),
+    ("totals_aggregation", "Aggregate TOTALS_T"),
+    ("kerrigan_total", "Total Kerrigan"),
+]
+for key, label in labels:
+    if values[key]:
+        print(f"{label:<32} {sum(values[key])/1000:>11.3f} s  ({len(values[key])} entries)")
+print("Detailed timings:", p)
+print("Compiler log:", p.parent / "cmake_build.log")
+PY_TIMING_SUMMARY
 
 if [[ $PIPELINE_FAILED -ne 0 ]]; then
     echo "KERRIGAN finished with one or more failed subprocess calculations." >&2
