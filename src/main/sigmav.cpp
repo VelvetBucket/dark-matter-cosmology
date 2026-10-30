@@ -11,6 +11,9 @@
 #include "options.h"
 #include <gsl/gsl_sf_bessel.h>
 #include <stdexcept>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 using namespace std;
 
@@ -31,16 +34,19 @@ double sigma(double s){
   const double a = 0;  // cosθ_min
   const double b =  M_PI;  // cosθ_max
   
-  const double mi1 = sigmav_iface::getMasses().at(0);
-  const double mi2 = sigmav_iface::getMasses().at(1);
-  const double mf1 = sigmav_iface::getMasses().at(2);
-  const double mf2 = sigmav_iface::getMasses().at(3);
+  const auto& masses = sigmav_iface::getMasses();   // const&, no copy
+
+  const double mi1 = masses[0];
+  const double mi2 = masses[1];
+  const double mf1 = masses[2];
+  const double mf2 = masses[3];
+  
   double p_f, p_i, factor, error;
   
   //double integral = gauss(&diff_sigma, s, a, b, 7);
   auto f1 = [s](double theta) { return diff_sigma(theta,s); };
   //double integral = integrator.integrate(f1, a,b, 1e-04);
-  double integral = mb::gauss_kronrod(f1, a, b, 5, 1e-02);
+  double integral = mb::gauss_kronrod(f1, a, b, 5, 1e-04);
   //double integral = simpson(diff_sigma, s, a, b, 1.0e-03, NULL);
   
   if (integral > 0.0) {
@@ -194,12 +200,41 @@ int main(int argc, char** argv){
   } else {
     
     cout << "# x (DM_candidate_mass/T) vs. sigma*v" << endl;
-    
-    for(int n = 0; n < N; n++){
-      un = ui + n*h;
-      Tn = std::exp(un);
-      sigv_n = sigma_v(Tn);
-      cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << sigv_n << "\n";
+
+    // Precompute T values (cheap, avoids exp() in the parallel region)
+    std::vector<double> Ts(N);
+    for (int n = 0; n < N; n++) {
+        Ts[n] = std::exp(ui + n * h);
+    }
+
+    // Parallel evaluation of sigma_v(Ts[n])
+    std::vector<double> sigv(N, 0.0);
+
+    int n_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()) / 2);
+    if (n_threads > N) n_threads = N;
+    if (n_threads < 1) n_threads = 1;
+
+    std::cerr << "# Using " << n_threads << " threads\n";
+
+    std::atomic<int> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(n_threads);
+
+    for (int w = 0; w < n_threads; ++w) {
+        workers.emplace_back([&]() {
+            while (true) {
+                int n = next.fetch_add(1);
+                if (n >= N) break;
+                sigv[n] = sigma_v(Ts[n]);
+            }
+        });
+    }
+    for (auto& t : workers) t.join();
+
+    // Print serially — deterministic order, no cout races
+    for (int n = 0; n < N; n++) {
+        cout << setiosflags(ios::scientific) << setprecision(8)
+             << m1 / Ts[n] << " " << sigv[n] << "\n";
     }
   }
   

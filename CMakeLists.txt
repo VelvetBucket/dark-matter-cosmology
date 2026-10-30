@@ -21,7 +21,10 @@
 
 cmake_minimum_required(VERSION 3.10)
 project(dark_matter_cosmology VERSION 1.0.0 LANGUAGES CXX)
+
 find_package(Boost REQUIRED CONFIG COMPONENTS program_options)
+find_package(Threads REQUIRED)
+
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
     set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
@@ -308,7 +311,7 @@ add_executable(sigmav    "${CMAKE_CURRENT_SOURCE_DIR}/src/main/sigmav.cpp")
 add_executable(evolution "${CMAKE_CURRENT_SOURCE_DIR}/src/main/evolution.cpp")
 add_executable(interp    "${CMAKE_CURRENT_SOURCE_DIR}/src/main/interp.cpp")
 
-target_link_libraries(sigmav    core_lib gsl gslcblas m)
+target_link_libraries(sigmav    core_lib gsl gslcblas m Threads::Threads)
 target_link_libraries(evolution core_lib)
 target_link_libraries(interp    core_lib)
 
