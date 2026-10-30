@@ -56,7 +56,8 @@ else
     JOBS=2
 fi
 # Cap to avoid thrashing
-[ "$JOBS" -gt 8 ] && JOBS=8
+JOBS=$(( JOBS / 2 ))
+[ "$JOBS" -lt 1 ] && JOBS=1
 # Allow override: JOBS=1 ./Kerrigan.sh DM_test
 JOBS="${JOBS_OVERRIDE:-$JOBS}"
 echo "Using ${JOBS} parallel jobs"
