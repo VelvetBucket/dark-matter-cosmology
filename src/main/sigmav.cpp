@@ -19,12 +19,11 @@ using namespace std;
 
 double diff_sigma(double theta, double s){
 
-  vector<double> masses = sigmav_iface::getMasses();
+  const auto& masses = sigmav_iface::getMasses();
   double sigma = 0.0;
   
   sigma = sigmav_iface::sigmaKin(s, theta);
   
-  masses.clear();
   return sigma;
 }
 
@@ -166,8 +165,6 @@ int main(int argc, char** argv){
     m1 = *std::min_element(newMasses.begin(), newMasses.end());
   }
   
-  const double mi1 = sigmav_iface::getMasses().at(0);
-  const double mi2 = sigmav_iface::getMasses().at(1);
   double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
   double un, Tn, sigv_n;
   
