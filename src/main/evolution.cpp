@@ -135,6 +135,9 @@ vector<double> Nsolver(const vector<pair<double,double>> neq_x_data, const vecto
 
 int main(int argc, char** argv){
   
+  if (argc == 2)
+    cout << argv[1] << endl;
+  
   const string card = "35_75-1";
   
   const vector<pair<double,double>> neq_x_data = datatable_to_pairs(data_extractor("./output/" + card + "/neq.dat"));

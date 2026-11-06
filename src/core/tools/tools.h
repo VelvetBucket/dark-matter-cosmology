@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <vector>
 
-
 /* Bessel functions*/
 double bessI0(double  x);
 double bessK0(double x);
