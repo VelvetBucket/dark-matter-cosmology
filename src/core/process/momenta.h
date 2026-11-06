@@ -6,6 +6,6 @@
 #include <iostream>
 #include <array>
 
-std::vector<double*> momenta(int ninitial, double energy, std::vector<double> masses, double theta);
+void momenta_into(double storage[4][4], int ninitial, double energy, std::vector<double> masses, double theta);
 
 #endif 

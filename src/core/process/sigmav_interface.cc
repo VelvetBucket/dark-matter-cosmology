@@ -56,10 +56,17 @@ void setMomenta(std::vector<double*>& ps) {
 }
 
 double sigmaKin(double s, double theta) {
-    // Build momenta for this (s, theta) and feed it to this thread's process.
-    std::vector<double*> ps = momenta(2, std::sqrt(s), proc().getMasses(), theta);
+    // Per-thread storage: 4 particles × 4 doubles
+    thread_local double storage[4][4];
+    thread_local std::vector<double*> ps(4);
+
+    // Fill storage directly (no heap allocation)
+    momenta_into(storage, 2, std::sqrt(s), proc().getMasses(), theta);
+
+    // Set pointers to the storage rows
+    for (int i = 0; i < 4; ++i) ps[i] = storage[i];
+
     proc().setMomenta(ps);
     return proc().sigmaKin(s, theta);
 }
-
 } // namespace sigmav_iface

@@ -53,7 +53,7 @@ double sigma(double s){
     p_i = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
     if (p_f < 1e-15 || p_i < 1e-15) return 0.0;
     factor = p_f/(32.0 * M_PI);
-    integral*=factor;///(s * p_i);
+    integral*=factor;
   }
   return integral;
 }
@@ -67,11 +67,7 @@ double diff_A(double u, double T){
   const auto& masses = sigmav_iface::getMasses();
   const double mi1 = masses[0];
   const double mi2 = masses[1];
-  const double mass_ratio_cut = 100.0;  // or 1.5, 2.0, etc.
   
-  //if (mi1 > mass_ratio_cut*m1 || mi2 > mass_ratio_cut*m1) return 0.0; 
-  
-  //if (mi1 != m1 || mi2 != m1) return 0.0;
   double gi = 0.0, gj= 0.0; 
   
   for (auto mi_gi : newDOF) {
@@ -122,7 +118,6 @@ double sigma_v(double T){
   double lim_sup = 80.0;//std::numeric_limits<double>::infinity();
   
   double error, den, mi, b22, k2_mi, factor_den = 0.0;
-  int Err = 1;
   den = pow(m1,4);
   for (auto mi_gi : newDOF) {
     mi = mi_gi.first;
