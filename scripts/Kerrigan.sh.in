@@ -149,7 +149,7 @@ else
 fi
 # Cap to avoid thrashing
 JOBS=$(( JOBS / 2 ))
-[ "$JOBS" -gt 8 ] && JOBS=8
+[ "$JOBS" -gt 12 ] && JOBS=12
 [ "$JOBS" -lt 1 ] && JOBS=1
 # Allow override: JOBS=1 ./Kerrigan.sh DM_test
 JOBS="${JOBS_OVERRIDE:-$JOBS}"
@@ -955,41 +955,8 @@ if [[ -n "$ALLOWED_PARTICLES_FILE" && -s "$ALLOWED_PARTICLES_FILE" ]]; then
     done < "$ALLOWED_PARTICLES_FILE"
 fi
 
-subprocess_folders=()
+subprocess_folders=("${unfiltered_processes[@]}")
 SELECTION_SOURCE="all"
-
-for process in "${unfiltered_processes[@]}"; do
-    selected=0
-
-    if [[ -n "$PROCESS_SELECTOR" && "$PROCESS_SELECTOR" != "all" ]]; then
-        SELECTION_SOURCE="process selector regex"
-        if [[ "$process" =~ $PROCESS_SELECTOR ]]; then
-            selected=1
-        fi
-    elif [[ ${#REPORT_PROCESS_SET[@]} -gt 0 ]]; then
-        SELECTION_SOURCE="selector JSON report"
-        [[ -n "${REPORT_PROCESS_SET[$process]:-}" ]] && selected=1
-    elif [[ ${#allowed_particles[@]} -gt 0 ]]; then
-        SELECTION_SOURCE="allowed_particles.txt"
-        for in1 in "${allowed_particles[@]}"; do
-            for in2 in "${allowed_particles[@]}"; do
-                if [[ "$process" == *"_${in1}${in2}_"* ]]; then
-                    selected=1
-                    break 2
-                fi
-            done
-        done
-    else
-        selected=1
-    fi
-
-    [[ $selected -eq 1 ]] && subprocess_folders+=("$process")
-done
-
-if [[ ${#subprocess_folders[@]} -eq 0 ]]; then
-    echo "ERROR: The current process filter selected zero SubProcesses." >&2
-    exit 1
-fi
 
 # The merged sigmav executable requires an explicit --mDM. Resolve it from
 # each card's Block MASS, never assume the same DM mass across a parameter scan.
@@ -1433,23 +1400,40 @@ else
             raw_file="$out_dir/.${sp_folder}.stdout.tmp"
             COMPUTE_START="$(now_ns)"
             if "$CACHED_BINARY" --input-card "$card" --mDM "${CARD_DM_MASSES[$card]}" \
-                  --x0 "$X_START" --xf "$X_END" --n-points "$N_POINTS" > "$raw_file"; then
-                if normalize_grid_table "$raw_file" "$sigma_file" "sigma-v"; then
-                    printf '%s\n' "$sigma_file" >> "$out_dir/.sigmav_files.list"
-                else
-                    echo "ERROR: Invalid sigma-v data for $sp_folder / $(basename -- "$card")" >&2
-                    echo "$sp_folder : invalid sigma-v data" >> "$out_dir/failed_processes.txt"
-                    rm -f -- "$sigma_file"
-                    PIPELINE_FAILED=1
-                fi
-            else
-                echo "ERROR: sigmav failed for $sp_folder / $(basename -- "$card")" >&2
-                echo "$sp_folder : sigmav failed" >> "$out_dir/failed_processes.txt"
-                rm -f -- "$sigma_file"
-                PIPELINE_FAILED=1
-            fi
-            record_timing sigmav_compute "$sp_folder" "$(basename -- "$card")" "$COMPUTE_START"
-            rm -f -- "$raw_file"
+		      --x0 "$X_START" --xf "$X_END" --n-points "$N_POINTS" > "$raw_file"; then
+
+		    # --- Skip if sigmav produced no data rows ---
+		    # A subprocess that doesn't match the card (filtered out) exits 0
+		    # with an empty or header-only output. Neither is a valid sigma-v table.
+		    data_rows=0
+		    if [[ -s "$raw_file" ]] && grep -qvE '^[[:space:]]*(#|Card:|$)' "$raw_file"; then
+    			data_rows=1
+		    fi
+
+		    if [[ "$data_rows" -eq 0 ]]; then
+			echo "  (no data for $sp_folder / $(basename -- "$card") — skipping)"
+			rm -f -- "$raw_file" "$sigma_file"
+			# Do NOT add to .sigmav_files.list
+			# Do NOT record in failed_processes.txt — this is not a failure
+		    else
+			# We have data rows — normalize and register
+			if normalize_grid_table "$raw_file" "$sigma_file" "sigma-v"; then
+			    printf '%s\n' "$sigma_file" >> "$out_dir/.sigmav_files.list"
+			else
+			    echo "ERROR: Invalid sigma-v data for $sp_folder / $(basename -- "$card")" >&2
+			    echo "$sp_folder : invalid sigma-v data" >> "$out_dir/failed_processes.txt"
+			    rm -f -- "$sigma_file"
+			    PIPELINE_FAILED=1
+			fi
+		    fi
+		else
+		    echo "ERROR: sigmav failed for $sp_folder / $(basename -- "$card")" >&2
+		    echo "$sp_folder : sigmav failed" >> "$out_dir/failed_processes.txt"
+		    rm -f -- "$sigma_file"
+		    PIPELINE_FAILED=1
+		fi
+		record_timing sigmav_compute "$sp_folder" "$(basename -- "$card")" "$COMPUTE_START"
+		rm -f -- "$raw_file"
         done
     done
 fi
@@ -1474,10 +1458,15 @@ for card in "${cards[@]}"; do
         fi
         record_timing totals_aggregation - "$(basename -- "$card")" "$TOTALS_START"
         successful_count="$(wc -l < "$out_dir/.sigmav_files.list" | tr -d ' ')"
-        if [[ "$successful_count" -ne "${#subprocess_folders[@]}" ]]; then
-            echo "ERROR: Not all selected subprocesses succeeded for $card ($successful_count/${#subprocess_folders[@]})." >&2
-            PIPELINE_FAILED=1
-        fi
+	failed_count="$(grep -cve '^[[:space:]]*$' "$out_dir/failed_processes.txt" || true)"
+
+	if [[ "$successful_count" -eq 0 ]]; then
+	    echo "ERROR: No subprocess produced data for $card." >&2
+	    PIPELINE_FAILED=1
+	elif [[ "$failed_count" -ne 0 ]]; then
+	    echo "ERROR: $failed_count subprocess(es) failed for $card." >&2
+	    PIPELINE_FAILED=1
+	fi
     fi
     failed_count="$(grep -cve '^[[:space:]]*$' "$out_dir/failed_processes.txt" || true)"
     if [[ "$failed_count" -ne 0 ]]; then
