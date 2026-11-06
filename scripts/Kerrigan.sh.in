@@ -1319,46 +1319,6 @@ fi
 # need to be recalculated for each annihilation final state.
 PIPELINE_FAILED=0
 
-for sp_folder in "${subprocess_folders[@]}"; do
-    ((++sp_index))
-    sp_source="$SUBPROCESSES_DIR/$sp_folder"
-
-    echo ""
-    echo "[$sp_index/$sp_number] $sp_folder"
-
-    if [[ ! -f "$sp_source/CPPProcess.cc" || ! -f "$sp_source/CPPProcess.h" ]]; then
-        echo "ERROR: CPPProcess.cc/.h missing in $sp_source" >&2
-        for card in "${cards[@]}"; do
-            echo "$sp_folder : missing CPPProcess files" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
-        done
-        PIPELINE_FAILED=1
-        continue
-    fi
-    
-    t_start
-    cp -a -- "$sp_source/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.cc"
-    cp -a -- "$sp_source/CPPProcess.h" "$PROCESS_DIR/CPPProcess.h"
-    # cp -a preserves the old modification time; force a rebuild explicitly.
-    touch -- "$PROCESS_DIR/CPPProcess.cc" "$PROCESS_DIR/CPPProcess.h"
-    t_end "copy ${sp_source}"
-    
-    t_start
-    if ! cmake --build "$BUILD_DIR" --target sigmav -j"${JOBS}"; then
-        echo "ERROR: CMake sigmav build failed for $sp_folder" >&2
-        for card in "${cards[@]}"; do
-            echo "$sp_folder : CMake sigmav build failed" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
-        done
-        PIPELINE_FAILED=1
-        continue
-    fi
-    t_end "build sigmav"
-    
-    if [[ ! -x "$BIN_DIR/sigmav" ]]; then
-        echo "ERROR: executable not found after make sigmav: $BIN_DIR/sigmav" >&2
-        exit 1
-    fi
-
-    t_start
 if [[ "$TASK" == "neq" ]]; then
     neq_process="$(basename -- "$initial_process")"
     if ! timed_cmake neq_single_build "$neq_process" cmake --build "$BUILD_DIR" --target sigmav; then
@@ -1392,9 +1352,6 @@ if [[ "$TASK" == "neq" ]]; then
         record_timing neq_compute "$neq_process" "$(basename -- "$card")" "$NEQ_START"
         rm -f -- "$raw_file"
     done
-
-    t_end "running cards"
-done
 
 else
     sp_number=${#subprocess_folders[@]}
