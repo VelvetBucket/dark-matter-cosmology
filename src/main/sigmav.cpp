@@ -30,18 +30,15 @@ double sigma(double s){
   const double mf1 = masses[2];
   const double mf2 = masses[3];
   
-  double p_f, p_i, factor, error;
+  double p_f, p_i, factor;
   
   //double integral = gauss(&diff_sigma, s, a, b, 7);
   auto f1 = [s](double theta) { return sigmav_iface::sigmaKin(s, theta); };
-  //double integral = integrator.integrate(f1, a,b, 1e-04);
   double integral = mb::gauss_kronrod(f1, a, b, 5, 1.e-02);
-  //double integral = simpson(diff_sigma, s, a, b, 1.0e-03, NULL);
-  
+
   if (integral > 0.0) {
     p_f = 0.5 * sqrt((s - pow(mf1 + mf2,2))*(s - pow(mf1 - mf2,2))/s);
-    p_i = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
-    if (p_f < 1.e-15 || p_i < 1.e-15) return 0.0;
+    if (p_f < 1.e-15) return 0.0;
     factor = p_f/(32.0 * M_PI);
     integral*=factor;
   }
@@ -50,7 +47,7 @@ double sigma(double s){
 
 double diff_A(double u, double T){
   
-  vector<std::pair<double, double>> newDOF = sigmav_iface::getNewDOF();
+  const vector<std::pair<double, double>> newDOF = sigmav_iface::getNewDOF();
   const vector<double> newMasses = sigmav_iface::getNewMasses();
   const double m1 = *std::min_element(newMasses.begin(), newMasses.end());;
   
@@ -80,12 +77,12 @@ double diff_A(double u, double T){
   const double s = pow(u*T + mi1 + mi2,2);
   const double var_change = 1.0;
   
-  double p_ij = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
+  const double p_ij = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
   
   if (p_ij < 1.e-15) return 0.0;
   
-  double sigma_ij = sigma(s);
-  double dA, b12;
+  const double sigma_ij = sigma(s);
+  double b12;
   
   if (s < 1.e-15) return 0.0;
   
@@ -94,10 +91,8 @@ double diff_A(double u, double T){
   } else {
     b12 = bess12(sqrt(s)/T, m1/T);
   }
-  
-  dA = gi * gj * p_ij * sigma_ij * b12;
-  //cout << sqrt(s)/T << " " << m1/T << " " << b12 << "\n"; 
-  return dA;
+ 
+  return gi * gj * p_ij * sigma_ij * b12;
 }
 
 double sigma_v(double T){
@@ -107,10 +102,10 @@ double sigma_v(double T){
   const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
   const double k2_m1 = bessK2(m1/T);
   
-  double lim_inf = 0.0;
-  double lim_sup = 60.0;//std::numeric_limits<double>::infinity();
+  const double lim_inf = 0.0;
+  const double lim_sup = 60.0;
   
-  double error, den, mi, b22, k2_mi, factor_den = 0.0;
+  double den, mi, b22, k2_mi, factor_den = 0.0;
   den = pow(m1,4);
   for (auto mi_gi : newDOF) {
     mi = mi_gi.first;
@@ -133,10 +128,7 @@ double sigma_v(double T){
   if (den == 0.0) return 100000.0;
   
   auto f1 = [T](double t) { return diff_A(t,T); };
-  double A = 0.0;
-  //tanh_sinh<double> integrator;
-  //A = integrator.integrate(f1, lim_inf, lim_sup, 1e-04);
-  A = mb::gauss_kronrod(f1, lim_inf, lim_sup, 5, 1.e-02);
+  double A = mb::gauss_kronrod(f1, lim_inf, lim_sup, 5, 1.e-02);
   return A/den;
 }
 
@@ -145,17 +137,19 @@ int main(int argc, char** argv){
   Options opt = parse_args(argc, argv);
 
   string card = opt.inputFile;
-  double x0 = opt.x0, xf = opt.xf, m1 = opt.m1;
-  int N = opt.N;
+  const double x0 = opt.x0, xf = opt.xf;
+  const int N = opt.N;
   
   sigmav_iface::initProc(card);
   const vector<std::pair<double, double>> newDOF = sigmav_iface::getNewDOF();
   const vector<double> newMasses = sigmav_iface::getNewMasses();
+  
+  double m1 = opt.m1;
   if (m1 < 0.0) {
     m1 = *std::min_element(newMasses.begin(), newMasses.end());
   }
   
-  double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
+  const double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
   double un, Tn, sigv_n;
   
   cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
