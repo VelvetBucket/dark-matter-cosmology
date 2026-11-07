@@ -1,6 +1,6 @@
 #include "momenta.h"
 
-std::vector<double*> momenta(int ninitial, double energy, std::vector<double> masses, double theta) {
+void momenta_into(double storage[4][4], int ninitial, double energy, std::vector<double> masses, double theta) {
     // Precalcular el valor de e2 (energy al cuadrado) y sqrt(e2)
     double phi = 1.5 * M_PI;
     double e2 = energy * energy;
@@ -30,9 +30,16 @@ std::vector<double*> momenta(int ninitial, double energy, std::vector<double> ma
     p.reserve(4);
     
     // Asignar momentos de las partículas entrantes
-    p.push_back(new double[4]{energy1, 0, 0, mom_i});
-    p.push_back(new double[4]{energy2, 0, 0, -1.0*mom_i});
-
+    storage[0][0] = energy1;
+    storage[0][1] = 0.0;
+    storage[0][2] = 0.0;
+    storage[0][3] = mom_i;
+    
+    storage[1][0] = energy2;
+    storage[1][1] = 0.0;
+    storage[1][2] = 0.0;
+    storage[1][3] = -1.0 * mom_i;
+    
     // Masas de las partículas finales
     double m3 = masses[2];
     double m4 = masses[3];
@@ -54,8 +61,19 @@ std::vector<double*> momenta(int ninitial, double energy, std::vector<double> ma
     }
 
     // Asignar momentos de las partículas salientes
-    p.push_back(new double[4]{energy3, mom_f * std::sin(theta) * std::cos(phi), mom_f * std::sin(theta) * std::sin(phi), mom_f * std::cos(theta)});
-    p.push_back(new double[4]{energy4, -mom_f * std::sin(theta) * std::cos(phi), -mom_f * std::sin(theta) * std::sin(phi), -mom_f * std::cos(theta)});
-    //std::cout << "adios__ " << mom << " " << (mom * mom) << "\n";
-    return p;
+    const double sin_theta = std::sin(theta);
+    const double cos_theta = std::cos(theta);
+    const double cos_phi   = std::cos(phi);
+    const double sin_phi   = std::sin(phi);
+    
+    storage[2][0] = energy3;
+    storage[2][1] = mom_f * sin_theta * cos_phi;
+    storage[2][2] = mom_f * sin_theta * sin_phi;
+    storage[2][3] = mom_f * cos_theta;
+    
+    storage[3][0] = energy4;
+    storage[3][1] = -mom_f * sin_theta * cos_phi;
+    storage[3][2] = -mom_f * sin_theta * sin_phi;
+    storage[3][3] = -mom_f * cos_theta;
+    
 }
