@@ -75,11 +75,10 @@ double diff_A(double u, double T, const double m1, double k2_m1_scaled, const ve
   if (p_ij < 1.e-15) return 0.0;
   
   const double sigma_ij = sigma(s, masses);
-  double b12;
   
   if (s < 1.e-15) return 0.0;
   
-  b12 = exp(-(sqrt(s) - 2.0*m1)/T) * gsl_sf_bessel_Kn_scaled(1, sqrt(s)/T)/(k2_m1_scaled*k2_m1_scaled);
+  const double b12 = exp(-(sqrt(s) - 2.0*m1)/T) * gsl_sf_bessel_Kn_scaled(1, sqrt(s)/T)/(k2_m1_scaled*k2_m1_scaled);
  
   return gi * gj * p_ij * sigma_ij * b12;
 }
