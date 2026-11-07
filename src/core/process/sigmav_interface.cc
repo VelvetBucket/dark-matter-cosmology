@@ -55,13 +55,13 @@ void setMomenta(std::vector<double*>& ps) {
     proc().setMomenta(ps);
 }
 
-double sigmaKin(double s, double theta) {
+double sigmaKin(double s, double theta, const std::vector<double>& masses) {
     // Per-thread storage: 4 particles × 4 doubles
     thread_local double storage[4][4];
     thread_local std::vector<double*> ps(4);
 
     // Fill storage directly (no heap allocation)
-    momenta_into(storage, 2, std::sqrt(s), proc().getMasses(), theta);
+    momenta_into(storage, 2, std::sqrt(s), masses, theta);
     
     // Kinematic guard: if any particle has non-positive energy, the
     // configuration is inaccessible 
