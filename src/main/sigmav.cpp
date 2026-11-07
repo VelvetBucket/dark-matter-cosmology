@@ -17,16 +17,6 @@
 
 using namespace std;
 
-double diff_sigma(double theta, double s){
-
-  const auto& masses = sigmav_iface::getMasses();
-  double sigma = 0.0;
-  
-  sigma = sigmav_iface::sigmaKin(s, theta);
-  
-  return sigma;
-}
-
 // Integra dσ/dcosθ en cosθ ∈ [-1, 1]
 double sigma(double s){
 
@@ -43,7 +33,7 @@ double sigma(double s){
   double p_f, p_i, factor, error;
   
   //double integral = gauss(&diff_sigma, s, a, b, 7);
-  auto f1 = [s](double theta) { return diff_sigma(theta,s); };
+  auto f1 = [s](double theta) { return sigmav_iface::sigmaKin(s, theta); };
   //double integral = integrator.integrate(f1, a,b, 1e-04);
   double integral = mb::gauss_kronrod(f1, a, b, 5, 1e-04);
   //double integral = simpson(diff_sigma, s, a, b, 1.0e-03, NULL);

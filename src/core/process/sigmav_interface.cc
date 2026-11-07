@@ -62,7 +62,15 @@ double sigmaKin(double s, double theta) {
 
     // Fill storage directly (no heap allocation)
     momenta_into(storage, 2, std::sqrt(s), proc().getMasses(), theta);
-
+    
+    // Kinematic guard: if any particle has non-positive energy, the
+    // configuration is inaccessible 
+    for (int i = 0; i < 4; ++i) {
+        if (storage[i][0] <= 0.0) {
+            return 0.0;
+        }
+    }
+    
     // Set pointers to the storage rows
     for (int i = 0; i < 4; ++i) ps[i] = storage[i];
 
