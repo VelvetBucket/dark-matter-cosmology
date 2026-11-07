@@ -35,13 +35,13 @@ double sigma(double s){
   //double integral = gauss(&diff_sigma, s, a, b, 7);
   auto f1 = [s](double theta) { return sigmav_iface::sigmaKin(s, theta); };
   //double integral = integrator.integrate(f1, a,b, 1e-04);
-  double integral = mb::gauss_kronrod(f1, a, b, 5, 1e-02);
+  double integral = mb::gauss_kronrod(f1, a, b, 5, 1.e-02);
   //double integral = simpson(diff_sigma, s, a, b, 1.0e-03, NULL);
   
   if (integral > 0.0) {
     p_f = 0.5 * sqrt((s - pow(mf1 + mf2,2))*(s - pow(mf1 - mf2,2))/s);
     p_i = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
-    if (p_f < 1e-15 || p_i < 1e-15) return 0.0;
+    if (p_f < 1.e-15 || p_i < 1.e-15) return 0.0;
     factor = p_f/(32.0 * M_PI);
     integral*=factor;
   }
@@ -82,10 +82,12 @@ double diff_A(double u, double T){
   
   double p_ij = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
   
-  if (p_ij < 1e-15) return 0.0;
+  if (p_ij < 1.e-15) return 0.0;
   
   double sigma_ij = sigma(s);
   double dA, b12;
+  
+  if (s < 1.e-15) return 0.0;
   
   if (m1/T > 10.0) {
     b12 = exp(-(sqrt(s) - 2.0*m1)/T) * gsl_sf_bessel_Kn_scaled(1, sqrt(s)/T)/pow(gsl_sf_bessel_Kn_scaled(2, m1/T),2);
@@ -134,7 +136,7 @@ double sigma_v(double T){
   double A = 0.0;
   //tanh_sinh<double> integrator;
   //A = integrator.integrate(f1, lim_inf, lim_sup, 1e-04);
-  A = mb::gauss_kronrod(f1, lim_inf, lim_sup, 5, 1e-02);
+  A = mb::gauss_kronrod(f1, lim_inf, lim_sup, 5, 1.e-02);
   return A/den;
 }
 
