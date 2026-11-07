@@ -14,6 +14,6 @@ const std::vector<std::pair<double, double>>& getNewDOF();
 const std::vector<double>& getNewMasses();
 
 void setMomenta(std::vector<double*>& ps);
-double sigmaKin(double s, double theta);
+double sigmaKin(double s, double theta, const std::vector<double>& masses);
 
 } // namespace sigmav_iface

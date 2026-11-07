@@ -144,7 +144,7 @@ int main(int argc, char** argv){
   const vector<pair<double,double>> sigmav_x_data = datatable_to_pairs(data_extractor("./output/" + card + "/TOTALS_T.dat"));
   
   const double m1 = 1.87710315e+00;
-  const double ai = 1.e-10, af = 1.e+10, default_h = 0.01;  
+  const double ai = 1.e-7, af = 1.e+7, default_h = 0.01;  
   double an = ai, jn = log(an), jf = log(af), Tn = Temp(an);
   double Nn = pow(ai, 3) * xlog_ylog_interpolator(neq_x_data, m1/Tn);
   double Neqn = Nn;

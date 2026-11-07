@@ -2346,7 +2346,7 @@ def resolve_sigmav_interval(
     """Distinguish the thermal x_FO reference from the executable's x bounds."""
     if profile not in {"history", "freezeout"}:
         raise ValueError("--sigmav-profile must be history or freezeout")
-    start_default, end_default = ((1e-10, 1e7) if profile == "history"
+    start_default, end_default = ((1e-7, 1e7) if profile == "history"
                                   else (x_freezeout / 10.0, x_freezeout * 10.0))
     x_start = start_default if requested_start is None else float(requested_start)
     x_end = end_default if requested_end is None else float(requested_end)
@@ -2371,7 +2371,7 @@ def run_kerrigan(
     verbose: bool,
     cards_dir: Optional[Path] = None,
     sigmav_profile: str = "history",
-    x_start: float = 1e-10,
+    x_start: float = 1e-7,
     x_end: float = 1e7,
     n_points: int = 1000,
 ) -> None:
@@ -2960,7 +2960,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--sigmav-profile", "--profile", choices=["history", "freezeout"], default=None,
-        help="Sigma-v evaluation interval: history (1e-10..1e7) or freezeout "
+        help="Sigma-v evaluation interval: history (1e-7..1e7) or freezeout "
              "(x_FO/10..10*x_FO). Default: history.",
     )
     parser.add_argument(

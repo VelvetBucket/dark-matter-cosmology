@@ -5,7 +5,7 @@
 struct Options {
     std::string inputFile;
     int         N  = 1000;
-    double      x0  =  1.e-10;
+    double      x0  =  1.e-7;
     double      xf = 1.e+7;
     double      m1 = -1.0;
     bool        neq   = false;

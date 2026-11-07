@@ -17,54 +17,34 @@
 
 using namespace std;
 
-double diff_sigma(double theta, double s){
-
-  const auto& masses = sigmav_iface::getMasses();
-  double sigma = 0.0;
-  
-  sigma = sigmav_iface::sigmaKin(s, theta);
-  
-  return sigma;
-}
-
 // Integra dσ/dcosθ en cosθ ∈ [-1, 1]
-double sigma(double s){
+double sigma(double s, const vector<double>& masses){
 
   const double a = 0;  // cosθ_min
   const double b =  M_PI;  // cosθ_max
-  
-  const auto& masses = sigmav_iface::getMasses();   // const&, no copy
 
   const double mi1 = masses[0];
   const double mi2 = masses[1];
   const double mf1 = masses[2];
   const double mf2 = masses[3];
   
-  double p_f, p_i, factor, error;
+  double p_f, p_i, factor;
   
   //double integral = gauss(&diff_sigma, s, a, b, 7);
-  auto f1 = [s](double theta) { return diff_sigma(theta,s); };
-  //double integral = integrator.integrate(f1, a,b, 1e-04);
-  double integral = mb::gauss_kronrod(f1, a, b, 5, 1e-04);
-  //double integral = simpson(diff_sigma, s, a, b, 1.0e-03, NULL);
-  
+  auto f1 = [s, &masses](double theta) { return sigmav_iface::sigmaKin(s, theta, masses); };
+  double integral = mb::gauss_kronrod(f1, a, b, 5, 1.e-02);
+
   if (integral > 0.0) {
     p_f = 0.5 * sqrt((s - pow(mf1 + mf2,2))*(s - pow(mf1 - mf2,2))/s);
-    p_i = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
-    if (p_f < 1e-15 || p_i < 1e-15) return 0.0;
+    if (p_f < 1.e-15) return 0.0;
     factor = p_f/(32.0 * M_PI);
     integral*=factor;
   }
   return integral;
 }
 
-double diff_A(double u, double T){
+double diff_A(double u, double T, const double m1, double k2_m1_scaled, const vector<double>& masses, const vector<std::pair<double, double>>& newDOF, const vector<double>& newMasses){
   
-  vector<std::pair<double, double>> newDOF = sigmav_iface::getNewDOF();
-  const vector<double> newMasses = sigmav_iface::getNewMasses();
-  const double m1 = *std::min_element(newMasses.begin(), newMasses.end());;
-  
-  const auto& masses = sigmav_iface::getMasses();
   const double mi1 = masses[0];
   const double mi2 = masses[1];
   
@@ -90,34 +70,29 @@ double diff_A(double u, double T){
   const double s = pow(u*T + mi1 + mi2,2);
   const double var_change = 1.0;
   
-  double p_ij = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
-  double sigma_ij = sigma(s);
-  double dA, b12;
+  const double p_ij = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
   
-  if (p_ij < 1e-15) return 0.0; 
+  if (p_ij < 1.e-15) return 0.0;
   
-  if (m1/T > 10.0) {
-    b12 = exp(-(sqrt(s) - 2.0*m1)/T) * gsl_sf_bessel_Kn_scaled(1, sqrt(s)/T)/pow(gsl_sf_bessel_Kn_scaled(2, m1/T),2);
-  } else {
-    b12 = bess12(sqrt(s)/T, m1/T);
-  }
+  const double sigma_ij = sigma(s, masses);
+  double b12;
   
-  dA = gi * gj * p_ij * sigma_ij * b12;
-  //cout << sqrt(s)/T << " " << m1/T << " " << b12 << "\n"; 
-  return dA;
+  if (s < 1.e-15) return 0.0;
+  
+  b12 = exp(-(sqrt(s) - 2.0*m1)/T) * gsl_sf_bessel_Kn_scaled(1, sqrt(s)/T)/(k2_m1_scaled*k2_m1_scaled);
+ 
+  return gi * gj * p_ij * sigma_ij * b12;
 }
 
-double sigma_v(double T){
-
-  const auto& newDOF = sigmav_iface::getNewDOF();
-  const auto& newMasses = sigmav_iface::getNewMasses();
-  const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
+double sigma_v(double T, const double m1, const vector<double>& masses, const vector<std::pair<double, double>>& newDOF, const vector<double>& newMasses){
+  
   const double k2_m1 = bessK2(m1/T);
   
-  double lim_inf = 0.0;
-  double lim_sup = 80.0;//std::numeric_limits<double>::infinity();
+  const double lim_inf = 0.0;
+  const double lim_sup = 60.0;
+  const double k2_m1_scaled = gsl_sf_bessel_Kn_scaled(2, m1 / T);
   
-  double error, den, mi, b22, k2_mi, factor_den = 0.0;
+  double den, mi, b22, k2_mi, factor_den = 0.0;
   den = pow(m1,4);
   for (auto mi_gi : newDOF) {
     mi = mi_gi.first;
@@ -126,7 +101,7 @@ double sigma_v(double T){
     } else {
       k2_mi = bessK2(mi/T);
       if (mi/T > 10.0){
-        b22 = exp(-(mi - m1)/T) * gsl_sf_bessel_Kn_scaled(2, mi/T)/gsl_sf_bessel_Kn_scaled(2, m1/T);
+        b22 = exp(-(mi - m1)/T) * gsl_sf_bessel_Kn_scaled(2, mi/T)/k2_m1_scaled;
       } else {
         b22 = k2_mi/k2_m1;
       }
@@ -139,11 +114,8 @@ double sigma_v(double T){
   den *= pow(factor_den,2);
   if (den == 0.0) return 100000.0;
   
-  auto f1 = [T](double t) { return diff_A(t,T); };
-  double A = 0.0;
-  //tanh_sinh<double> integrator;
-  //A = integrator.integrate(f1, lim_inf, lim_sup, 1e-04);
-  A = mb::gauss_kronrod(f1, lim_inf, lim_sup, 5, 1e-04);
+  auto f1 = [T,m1,k2_m1_scaled,&masses,&newDOF,&newMasses](double u) { return diff_A(u,T,m1,k2_m1_scaled,masses,newDOF,newMasses); };
+  double A = mb::gauss_kronrod(f1, lim_inf, lim_sup, 5, 1.e-02);
   return A/den;
 }
 
@@ -152,17 +124,15 @@ int main(int argc, char** argv){
   Options opt = parse_args(argc, argv);
 
   string card = opt.inputFile;
-  double x0 = opt.x0, xf = opt.xf, m1 = opt.m1;
-  int N = opt.N;
+  const double x0 = opt.x0, xf = opt.xf;
+  const int N = opt.N;
   
   sigmav_iface::initProc(card);
-  const vector<std::pair<double, double>> newDOF = sigmav_iface::getNewDOF();
-  const vector<double> newMasses = sigmav_iface::getNewMasses();
-  if (m1 < 0.0) {
-    m1 = *std::min_element(newMasses.begin(), newMasses.end());
-  }
+  const auto& newDOF = sigmav_iface::getNewDOF();
+  const auto& newMasses = sigmav_iface::getNewMasses();
+  const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
   
-  double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
+  const double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
   double un, Tn, sigv_n;
   
   cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
@@ -245,11 +215,11 @@ int main(int argc, char** argv){
     workers.reserve(n_threads);
 
     for (int w = 0; w < n_threads; ++w) {
-        workers.emplace_back([&]() {
+        workers.emplace_back([&, masses, newDOF, newMasses]() {
             while (true) {
                 int n = next.fetch_add(1);
                 if (n >= N) break;
-                sigv[n] = sigma_v(Ts[n]);
+                sigv[n] = sigma_v(Ts[n], m1, masses, newDOF, newMasses);
             }
         });
     }
