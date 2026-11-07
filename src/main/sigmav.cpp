@@ -85,10 +85,9 @@ double diff_A(double u, double T, const double m1, double k2_m1_scaled, const ve
 
 double sigma_v(double T, const double m1, const vector<double>& masses, const vector<std::pair<double, double>>& newDOF, const vector<double>& newMasses){
   
-  const double k2_m1 = bessK2(m1/T);
-  
   const double lim_inf = 0.0;
   const double lim_sup = 60.0;
+  const double k2_m1 = bessK2(m1/T);
   const double k2_m1_scaled = gsl_sf_bessel_Kn_scaled(2, m1 / T);
   
   double den, mi, b22, k2_mi, factor_den = 0.0;
@@ -98,15 +97,12 @@ double sigma_v(double T, const double m1, const vector<double>& masses, const ve
     if (mi == m1) {
       factor_den += mi_gi.second;
     } else {
-      k2_mi = bessK2(mi/T);
       if (mi/T > 10.0){
         b22 = exp(-(mi - m1)/T) * gsl_sf_bessel_Kn_scaled(2, mi/T)/k2_m1_scaled;
       } else {
-        b22 = k2_mi/k2_m1;
+        b22 = bessK2(mi/T)/k2_m1;
       }
-      if (true) {
-        factor_den += mi_gi.second * pow(mi/m1,2) * b22;
-      }
+      factor_den += mi_gi.second * pow(mi/m1,2) * b22;
     }
   }
   
@@ -134,12 +130,11 @@ int main(int argc, char** argv){
   const double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
   double un, Tn, sigv_n;
   
-  cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
-  
   if (opt.neq) {
     
     double mi, neq, k2_mi;
     
+    cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
     cout << "# x (DM_candidate_mass/T) vs. n_equilibrium" << endl;
     
     for(int n = 0; n < N; n++){
@@ -192,6 +187,7 @@ int main(int argc, char** argv){
     
     if (std::min(frac1, frac2) < 0.001) return 0;
     
+    cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
     cout << "# x (DM_candidate_mass/T) vs. sigma*v" << endl;
 
     // Precompute T values (cheap, avoids exp() in the parallel region)
