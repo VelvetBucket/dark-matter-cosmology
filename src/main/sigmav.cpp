@@ -106,7 +106,7 @@ double sigma_v(double T){
   const double k2_m1 = bessK2(m1/T);
   
   double lim_inf = 0.0;
-  double lim_sup = 80.0;//std::numeric_limits<double>::infinity();
+  double lim_sup = 60.0;//std::numeric_limits<double>::infinity();
   
   double error, den, mi, b22, k2_mi, factor_den = 0.0;
   den = pow(m1,4);
