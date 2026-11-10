@@ -229,6 +229,8 @@ CANDIDATE_PDG_INPUT="${KERRIGAN_CANDIDATE_PDG:-}"
 SELECTION_REPORT="${KERRIGAN_SELECTION_REPORT:-}"
 PROCESS_SELECTOR="${KERRIGAN_PROCESS_SELECTOR:-}"
 OUTPUT_ROOT="${KERRIGAN_OUTPUT_ROOT:-$OUTPUT_ROOT_DEFAULT}"
+RUN_NAME_INPUT="${KERRIGAN_RUN_NAME:-}"
+RUN_ID_INPUT="${KERRIGAN_RUN_ID:-}"
 ALLOWED_PARTICLES_FILE="${KERRIGAN_ALLOWED_PARTICLES:-}"
 # Legacy UI2 compatibility: its --task sigmav plus --sigmav-profile maps to
 # the new single task flag. The user-facing interface has only three tasks.
@@ -283,6 +285,8 @@ Options:
   --process-selector REGEX  Exact/regex process filter. The selector UI normally
                             provides this via KERRIGAN_PROCESS_SELECTOR.
   --output-root DIR         Root for run outputs. Default: $OUTPUT_ROOT_DEFAULT
+  --run-name NAME           Custom grouped run name (one subdirectory per card).
+  --run-id ID               Advanced: shared ID across multiple Kerrigan calls.
   --allowed-particles FILE  Fallback Overseer-style particle-token filter.
   --debug                   Show all detailed output, CMake progress, and timings.
   --verbose-build           Show CMake build progress (normally logged only).
@@ -299,9 +303,10 @@ Process-selection priority:
   > allowed_particles.txt > all SubProcesses.
 
 Output naming:
-  <card>__<mode>__<candidate>__<task>__<timestamp>/
+  <output-root>/<variant>/runs/<name>__<id>/<param-card>/
 
-A timestamp is always included so previous results are never overwritten.
+A run has a unique ID and never overwrites previous card results.
+UI2 supplies one shared run ID even when cards require distinct selections.
 EOF_USAGE
 }
 
@@ -370,6 +375,16 @@ while [[ $# -gt 0 ]]; do
         --output-root)
             [[ $# -ge 2 ]] || { echo "ERROR: --output-root needs a value" >&2; exit 2; }
             OUTPUT_ROOT="$2"
+            shift 2
+            ;;
+        --run-name)
+            [[ $# -ge 2 ]] || { echo "ERROR: --run-name needs a value" >&2; exit 2; }
+            RUN_NAME_INPUT="$2"
+            shift 2
+            ;;
+        --run-id)
+            [[ $# -ge 2 ]] || { echo "ERROR: --run-id needs a value" >&2; exit 2; }
+            RUN_ID_INPUT="$2"
             shift 2
             ;;
         --allowed-particles)
@@ -955,8 +970,41 @@ if [[ -n "$ALLOWED_PARTICLES_FILE" && -s "$ALLOWED_PARTICLES_FILE" ]]; then
     done < "$ALLOWED_PARTICLES_FILE"
 fi
 
-subprocess_folders=("${unfiltered_processes[@]}")
+subprocess_folders=()
 SELECTION_SOURCE="all"
+
+for process in "${unfiltered_processes[@]}"; do
+    selected=0
+
+    if [[ -n "$PROCESS_SELECTOR" && "$PROCESS_SELECTOR" != "all" ]]; then
+        SELECTION_SOURCE="process selector regex"
+        if [[ "$process" =~ $PROCESS_SELECTOR ]]; then
+            selected=1
+        fi
+    elif [[ ${#REPORT_PROCESS_SET[@]} -gt 0 ]]; then
+        SELECTION_SOURCE="selector JSON report"
+        [[ -n "${REPORT_PROCESS_SET[$process]:-}" ]] && selected=1
+    elif [[ ${#allowed_particles[@]} -gt 0 ]]; then
+        SELECTION_SOURCE="allowed_particles.txt"
+        for in1 in "${allowed_particles[@]}"; do
+            for in2 in "${allowed_particles[@]}"; do
+                if [[ "$process" == *"_${in1}${in2}_"* ]]; then
+                    selected=1
+                    break 2
+                fi
+            done
+        done
+    else
+        selected=1
+    fi
+
+    [[ $selected -eq 1 ]] && subprocess_folders+=("$process")
+done
+
+if [[ ${#subprocess_folders[@]} -eq 0 ]]; then
+    echo "ERROR: The current process filter selected zero SubProcesses." >&2
+    exit 1
+fi
 
 # The merged sigmav executable requires an explicit --mDM. Resolve it from
 # each card's Block MASS, never assume the same DM mass across a parameter scan.
@@ -1029,7 +1077,7 @@ PY_NORMALIZE
 }
 
 # ------------------------------------------------------------------------------
-# Plan non-overwriting output directories
+# Plan non-overwriting grouped run directories
 # ------------------------------------------------------------------------------
 
 RUN_STAMP="$(date '+%Y%m%d_%H%M%S_%N')"
@@ -1041,29 +1089,52 @@ else
     CANDIDATE_LABEL="$(sanitize_label "$CANDIDATE")"
 fi
 
-# The requested output is explicit in the run directory. The relic-density
-# solver is intentionally not exposed by Kerrigan.
 TASK_LABEL="$(sanitize_label "$TASK")"
+RUN_NAME_LABEL="$(sanitize_label "${RUN_NAME_INPUT:-${MODE_LABEL}__${TASK_LABEL}}")"
+RUN_ID_LABEL="$(sanitize_label "${RUN_ID_INPUT:-$RUN_STAMP}")"
+
+for value in "$RUN_NAME_LABEL" "$RUN_ID_LABEL"; do
+    if [[ -z "$value" || "$value" == "." || "$value" == ".." || ${#value} -gt 100 ]]; then
+        echo "ERROR: Run name or run ID must be a short, nonempty label." >&2
+        exit 2
+    fi
+done
+
+RUN_DIR="$OUTPUT_ROOT/${MODEL_VARIANT:-manual}/runs/${RUN_NAME_LABEL}__${RUN_ID_LABEL}"
+if [[ -z "$RUN_ID_INPUT" ]]; then
+    # A normal invocation always creates a fresh run, even if the name repeats.
+    next_id=1
+    while [[ -e "$RUN_DIR" || -L "$RUN_DIR" ]]; do
+        RUN_ID_LABEL="$(sanitize_label "${RUN_STAMP}_${next_id}")"
+        RUN_DIR="$OUTPUT_ROOT/${MODEL_VARIANT:-manual}/runs/${RUN_NAME_LABEL}__${RUN_ID_LABEL}"
+        ((next_id++))
+    done
+fi
+if [[ -L "$RUN_DIR" || ( -e "$RUN_DIR" && ! -d "$RUN_DIR" ) ]]; then
+    echo "ERROR: Run output location is not a directory: $RUN_DIR" >&2
+    exit 2
+fi
 
 declare -A CARD_OUTPUTS=()
-
+declare -A USED_CARD_LABELS=()
 for card in "${cards[@]}"; do
     card_stem="$(basename -- "$card")"
     card_stem="${card_stem%.dat}"
     card_label="$(sanitize_label "$card_stem")"
-
-    out_dir="$OUTPUT_ROOT/${MODEL_VARIANT}/runs/${card_label}__${MODE_LABEL}__${CANDIDATE_LABEL}__${TASK_LABEL}__${RUN_STAMP}"
-
-    # RUN_STAMP normally makes collisions impossible, but keep a deterministic
-    # fallback for filesystems with unusual clock resolution.
-    if [[ -e "$out_dir" ]]; then
-        counter=1
-        while [[ -e "${out_dir}__run${counter}" ]]; do
-            ((counter++))
-        done
-        out_dir="${out_dir}__run${counter}"
+    if [[ "$card_label" == "." || "$card_label" == ".." ]]; then
+        echo "ERROR: Invalid parameter-card directory: $card_stem" >&2
+        exit 2
     fi
-
+    if [[ -n "${USED_CARD_LABELS[$card_label]:-}" ]]; then
+        echo "ERROR: Two cards have the same output directory label: $card_label" >&2
+        exit 2
+    fi
+    USED_CARD_LABELS["$card_label"]="$card"
+    out_dir="$RUN_DIR/$card_label"
+    if [[ -e "$out_dir" || -L "$out_dir" ]]; then
+        echo "ERROR: Output already exists for $(basename -- "$card") in $RUN_DIR. Choose a new run ID." >&2
+        exit 2
+    fi
     CARD_OUTPUTS["$card"]="$out_dir"
 done
 
@@ -1091,6 +1162,7 @@ echo "Build directory    : $BUILD_DIR"
 echo "Cards directory    : $CARDS_DIR"
 echo "UI2 report         : ${SELECTION_REPORT:-none (manual run)}"
 echo "Output root        : $OUTPUT_ROOT"
+echo "Grouped run        : $RUN_DIR"
 echo "Task               : $TASK"
 echo "Relic-density solver: not executed"
 echo "Sigma-v x interval : $X_START .. $X_END ($N_POINTS samples)"
@@ -1109,8 +1181,28 @@ if [[ $DRY_RUN -eq 1 ]]; then
     exit 0
 fi
 
-# Diagnostics are separate from physics output and never overwrite earlier runs.
-DIAG_DIR="$OUTPUT_ROOT/${MODEL_VARIANT:-manual}/diagnostics/${RUN_STAMP}"
+# The same UI2 batch may invoke Kerrigan more than once. Reuse its run ID but
+# never reuse or overwrite a previously materialized parameter-card directory.
+if [[ -d "$RUN_DIR" ]]; then
+    if [[ ! -f "$RUN_DIR/.run_identity" ]] ||
+       ! grep -Fxq "run_id=$RUN_ID_LABEL" "$RUN_DIR/.run_identity" ||
+       ! grep -Fxq "run_name=$RUN_NAME_LABEL" "$RUN_DIR/.run_identity" ||
+       ! grep -Fxq "model_variant=${MODEL_VARIANT:-manual}" "$RUN_DIR/.run_identity"; then
+        echo "ERROR: Existing run has a different or missing identity: $RUN_DIR" >&2
+        exit 2
+    fi
+else
+    mkdir -p -- "$RUN_DIR"
+    printf 'run_id=%s\nrun_name=%s\nmodel_variant=%s\ncreated_at=%s\n' \
+        "$RUN_ID_LABEL" "$RUN_NAME_LABEL" "${MODEL_VARIANT:-manual}" "$RUN_STAMP" \
+        > "$RUN_DIR/.run_identity"
+fi
+if [[ ! -e "$RUN_DIR/run_manifest.tsv" ]]; then
+    printf 'card\tcandidate_pdg\ttask\tstatus\toutput_directory\n' > "$RUN_DIR/run_manifest.tsv"
+fi
+
+# Keep build logs and per-invocation timings inside the grouped experiment.
+DIAG_DIR="$RUN_DIR/diagnostics/${RUN_STAMP}"
 mkdir -p -- "$DIAG_DIR"
 BUILD_LOG="$DIAG_DIR/cmake_build.log"
 TIMING_LOG="$DIAG_DIR/timings.tsv"
@@ -1214,6 +1306,9 @@ for card in "${cards[@]}"; do
     cat > "$out_dir/run_metadata.txt" <<EOF_META
 card=$card
 card_stem=$card_stem
+run_name=$RUN_NAME_LABEL
+run_id=$RUN_ID_LABEL
+run_directory=$RUN_DIR
 mode=$MODE
 candidate=$CANDIDATE
 candidate_pdg=$CANDIDATE_PDG
@@ -1496,6 +1591,10 @@ successful_process_count=$successful_count
 failed_process_count=$failed_count
 status=$([[ "$card_complete" -eq 1 ]] && echo complete || echo incomplete)
 EOF_META_END
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$card" "$CANDIDATE_PDG" "$TASK" \
+        "$([[ "$card_complete" -eq 1 ]] && echo complete || echo incomplete)" "$out_dir" \
+        >> "$RUN_DIR/run_manifest.tsv"
 
     echo "Card               : $(basename -- "$card")"
     echo "Output             : $out_dir"

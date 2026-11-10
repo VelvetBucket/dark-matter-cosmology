@@ -53,6 +53,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -2370,6 +2371,8 @@ def run_kerrigan(
     physics_output_root: Optional[Path],
     verbose: bool,
     cards_dir: Optional[Path] = None,
+    run_name: Optional[str] = None,
+    run_id: Optional[str] = None,
     sigmav_profile: str = "history",
     x_start: float = 1e-7,
     x_end: float = 1e7,
@@ -2409,6 +2412,10 @@ def run_kerrigan(
 
     if physics_output_root is not None:
         command.extend(["--output-root", str(physics_output_root.resolve())])
+    if run_name is not None:
+        command.extend(["--run-name", run_name])
+    if run_id is not None:
+        command.extend(["--run-id", run_id])
 
     environment = os.environ.copy()
     environment["KERRIGAN_PROCESS_SELECTOR"] = selector_regex
@@ -2725,6 +2732,10 @@ def run_card_batch(
         print("Operation cancelled; no physics output was changed.")
         return 0
 
+    configured_run_name = config_value(args.run_name, file_config, "run_name", None)
+    run_name = str(configured_run_name) if configured_run_name is not None else f"{mode}__{sigmav_profile}"
+    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}"
+
     base_settings = {
         "model": layout.model_label,
         "model_root": str(layout.model_root),
@@ -2747,6 +2758,7 @@ def run_card_batch(
         "mg5_output": None if mg5_output is None else str(mg5_output),
         "physics_output_root": None if physics_root is None else str(physics_root),
         "batch_card_count": len(plans), "batch_common_selection": combined_batch,
+        "run_name": run_name, "run_id": run_id,
     }
 
     def install_and_report(plan: CardBatchPlan, create_selection: bool) -> Optional[Path]:
@@ -2809,6 +2821,7 @@ def run_card_batch(
             mg5_output=mg5_output,
             physics_output_root=physics_root,
             verbose=verbose,
+            run_name=run_name, run_id=run_id,
             sigmav_profile=sigmav_profile, x_start=x_start, x_end=x_end, n_points=n_points,
         )
     else:
@@ -2827,6 +2840,7 @@ def run_card_batch(
                 mg5_output=mg5_output,
                 physics_output_root=physics_root,
                 verbose=verbose,
+                run_name=run_name, run_id=run_id,
                 sigmav_profile=sigmav_profile, x_start=x_start, x_end=x_end, n_points=n_points,
             )
     print(f"\nCompleted sigma-v for {len(plans)} parameter cards.")
@@ -3077,6 +3091,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Advanced override: Kerrigan physics output directory.",
+    )
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help="Custom name for one grouped run containing a subdirectory per parameter card.",
     )
 
     parser.add_argument(
@@ -3573,6 +3592,7 @@ def main() -> int:
         "physics_output_root": (
             None if physics_output_root is None else str(physics_output_root)
         ),
+        "run_name": config_value(args.run_name, file_config, "run_name", None),
     }
 
     json_report, csv_report = write_reports(
@@ -3618,6 +3638,8 @@ def main() -> int:
         mg5_output=mg5_output,
         physics_output_root=physics_output_root,
         verbose=verbose,
+        run_name=(None if config_value(args.run_name, file_config, "run_name", None) is None
+                  else str(config_value(args.run_name, file_config, "run_name", None))),
         sigmav_profile=sigmav_profile, x_start=x_start, x_end=x_end, n_points=n_points,
     )
 
