@@ -515,6 +515,13 @@ then
 fi
 
 if ! replace_block "$template_dir/cpp_process_sigmaKin_function.inc" \
+    $'static bool goodhel[ncomb] = {ncomb * false};\nstatic int ntry = 0, sum_hel = 0, ngood = 0;\nstatic int igood[ncomb];\nstatic int jhel;' \
+    $'thread_local bool goodhel[ncomb] = {ncomb * false};\n  thread_local int ntry = 0, sum_hel = 0,\n   ngood = 0; \n  thread_local int igood[ncomb];\n   thread_local int jhel;\n'
+then
+    fail_modification
+fi
+
+if ! replace_block "$template_dir/cpp_process_sigmaKin_function.inc" \
     $'for (int i=0;i < nprocesses; i++)\n    matrix_element[i] /= denominators[i];\n\n\n' \
     $'for (int i=0;i < nprocesses; i++)\n    matrix_element[i] /= denominators[i];\n\nreturn matrix_element[0] * std::sin(theta);\n'
 then

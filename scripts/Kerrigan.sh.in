@@ -807,7 +807,7 @@ try:
     f = float(freeze)
     if not math.isfinite(f) or f <= 0:
         raise ValueError('x-freezeout must be finite and positive')
-    s = float(start) if start else (f/10 if operation == 'sigmavf' else 1e-10)
+    s = float(start) if start else (f/10 if operation == 'sigmavf' else 1e-7)
     e = float(end) if end else (f*10 if operation == 'sigmavf' else 1e7)
     n = int(n)
     if not (math.isfinite(s) and math.isfinite(e) and 0 < s < e and 2 <= n <= 1000000):
@@ -1351,8 +1351,7 @@ else
         # Is the cache valid? (exists + MD5 matches source)
         cache_valid=0
         if [[ -x "$CACHED_BINARY" && -f "$CACHE_STAMP" ]]; then
-            if ( cd "$(dirname -- "$sp_source")" && \
-                 md5sum -c --status "$CACHE_STAMP" >/dev/null 2>&1 ); then
+            if md5sum -c --status "$CACHE_STAMP" >/dev/null 2>&1; then
                 cache_valid=1
             else
                 echo "  cache stale for $sp_folder (source changed) — rebuilding"
@@ -1385,9 +1384,19 @@ else
             # ---- Save per-subprocess binary + MD5 stamp ----
             cp -a -- "$BIN_DIR/sigmav" "$CACHED_BINARY"
             chmod +x -- "$CACHED_BINARY"
-            ( cd "$(dirname -- "$sp_source")" && \
-              md5sum "$(basename -- "$sp_folder")/CPPProcess.cc" \
-                     "$(basename -- "$sp_folder")/CPPProcess.h" ) > "$CACHE_STAMP"
+	    {
+		    # Per-subprocess sources
+		    md5sum "$sp_source/CPPProcess.cc" \
+			   "$sp_source/CPPProcess.h"
+		    # All shared sources that affect the sigmav binary
+		    find "$SOURCE_DIR/src" -type f \( -name '*.cc' -o -name '*.cpp' -o -name '*.h' \) \
+			-print0 \
+			| LC_ALL=C sort -z \
+			| xargs -0 --no-run-if-empty md5sum
+		    # Build configuration
+		    md5sum "$SOURCE_DIR/CMakeLists.txt"
+	    } > "$CACHE_STAMP"
+
             echo "  cached binary: $CACHED_BINARY"
         else
             echo "  using cached binary: $CACHED_BINARY"
