@@ -23,21 +23,17 @@ double sigma(double s, const vector<double>& masses){
   const double a = 0;  // cosθ_min
   const double b =  M_PI;  // cosθ_max
 
-  const double mi1 = masses[0];
-  const double mi2 = masses[1];
   const double mf1 = masses[2];
   const double mf2 = masses[3];
-  
-  double p_f, p_i, factor;
   
   //double integral = gauss(&diff_sigma, s, a, b, 7);
   auto f1 = [s, &masses](double theta) { return sigmav_iface::sigmaKin(s, theta, masses); };
   double integral = mb::gauss_kronrod(f1, a, b, 5, 1.e-02);
 
   if (integral > 0.0) {
-    p_f = 0.5 * sqrt((s - pow(mf1 + mf2,2))*(s - pow(mf1 - mf2,2))/s);
+    const double p_f = 0.5 * sqrt((s - (mf1 + mf2)*(mf1 + mf2))*(s - (mf1 - mf2)*(mf1 - mf2))/s);
     if (p_f < 1.e-15) return 0.0;
-    factor = p_f/(32.0 * M_PI);
+    const double factor = p_f/(32.0 * M_PI);
     integral*=factor;
   }
   return integral;
@@ -67,10 +63,10 @@ double diff_A(double u, double T, const double m1, double k2_m1_scaled, const ve
     return -1.0 * 1e+7;
   }
   // u = sqrt(s)/T - mi1/T -mi2/T
-  const double s = pow(u*T + mi1 + mi2,2);
-  const double var_change = 1.0;
+  const double sqrt_s = u*T + mi1 + mi2;
+  const double s = sqrt_s * sqrt_s;
   
-  const double p_ij = 0.5 * sqrt((s - pow(mi1 + mi2,2))*(s - pow(mi1 - mi2,2))/s);
+  const double p_ij = 0.5 * sqrt((s - (mi1 + mi2)*(mi1 + mi2))*(s - (mi1 - mi2)*(mi1 - mi2))/s);
   
   if (p_ij < 1.e-15) return 0.0;
   
@@ -78,7 +74,7 @@ double diff_A(double u, double T, const double m1, double k2_m1_scaled, const ve
   
   if (s < 1.e-15) return 0.0;
   
-  const double b12 = exp(-(sqrt(s) - 2.0*m1)/T) * gsl_sf_bessel_Kn_scaled(1, sqrt(s)/T)/(k2_m1_scaled*k2_m1_scaled);
+  const double b12 = exp(-(sqrt_s - 2.0*m1)/T) * gsl_sf_bessel_Kn_scaled(1, sqrt_s/T)/(k2_m1_scaled*k2_m1_scaled);
  
   return gi * gj * p_ij * sigma_ij * b12;
 }
@@ -91,7 +87,7 @@ double sigma_v(double T, const double m1, const vector<double>& masses, const ve
   const double k2_m1_scaled = gsl_sf_bessel_Kn_scaled(2, m1 / T);
   
   double den, mi, b22, k2_mi, factor_den = 0.0;
-  den = pow(m1,4);
+  den = m1*m1*m1*m1;
   for (auto mi_gi : newDOF) {
     mi = mi_gi.first;
     if (mi == m1) {
@@ -102,11 +98,11 @@ double sigma_v(double T, const double m1, const vector<double>& masses, const ve
       } else {
         b22 = bessK2(mi/T)/k2_m1;
       }
-      factor_den += mi_gi.second * pow(mi/m1,2) * b22;
+      factor_den += mi_gi.second * mi * mi * b22 / (m1 * m1);
     }
   }
   
-  den *= pow(factor_den,2);
+  den *= factor_den * factor_den;
   if (den == 0.0) return 100000.0;
   
   auto f1 = [T,m1,k2_m1_scaled,&masses,&newDOF,&newMasses](double u) { return diff_A(u,T,m1,k2_m1_scaled,masses,newDOF,newMasses); };
@@ -119,20 +115,18 @@ int main(int argc, char** argv){
   Options opt = parse_args(argc, argv);
 
   string card = opt.inputFile;
-  const double x0 = opt.x0, xf = opt.xf;
-  const int N = opt.N;
-  
   sigmav_iface::initProc(card);
-  const auto& newDOF = sigmav_iface::getNewDOF();
-  const auto& newMasses = sigmav_iface::getNewMasses();
-  const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
-  
-  const double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
-  double un, Tn, sigv_n;
   
   if (opt.neq) {
     
-    double mi, neq, k2_mi;
+    const double x0 = opt.x0, xf = opt.xf;
+    const int N = opt.N;
+    const auto& newDOF = sigmav_iface::getNewDOF();
+    const auto& newMasses = sigmav_iface::getNewMasses();
+    const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
+  
+    const double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
+    double un, Tn, mi, neq, k2_mi;
     
     cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
     cout << "# x (DM_candidate_mass/T) vs. n_equilibrium" << endl;
@@ -148,13 +142,17 @@ int main(int argc, char** argv){
         if (mi/Tn > 10.0 || k2_mi == 0.0) {
           k2_mi = exp(-mi/Tn) * gsl_sf_bessel_Kn_scaled(2, mi/Tn);
         } 
-        neq += mi_gi.second * pow(mi,2) * k2_mi;
+        neq += mi_gi.second * mi * mi * k2_mi;
       }
-      neq *= Tn/(2.0*pow(M_PI,2)); 
+      neq *= Tn/(2.0*M_PI*M_PI); 
       cout << setiosflags(ios::scientific) << setprecision(8) << m1/Tn << " " << neq << "\n";
     }
     
   } else {
+    
+    const auto& newDOF = sigmav_iface::getNewDOF();
+    const auto& newMasses = sigmav_iface::getNewMasses();
+    const double m1 = *std::min_element(newMasses.begin(), newMasses.end());
     
     const auto& masses = sigmav_iface::getMasses();
     const double mi1 = masses[0];
@@ -186,6 +184,11 @@ int main(int argc, char** argv){
     const double frac2 = (gi2/g1) * std::pow(1. + delta2, 1.5) * std::exp(-x_f * delta2);
     
     if (std::min(frac1, frac2) < 0.001) return 0;
+    
+    const double x0 = opt.x0, xf = opt.xf;
+    const int N = opt.N;
+    const double T0 = m1/x0, Tf = m1/xf, ui = log(T0), h=log(Tf/T0)/(N-1);
+    double un, Tn, sigv_n;
     
     cout << setiosflags(ios::scientific) << setprecision(8) << "# m1 = " << m1 << " GeV" << "\n";
     cout << "# x (DM_candidate_mass/T) vs. sigma*v" << endl;
