@@ -5,8 +5,9 @@ UI2 - Scotogenic subprocess selector and physics orchestrator.
 Normal use is intentionally short.  UI2 auto-discovers the selected model
 layout (param_cards, SubProcesses, Build/build, effective_SubProcesses and
 back_up) relative to this file/project, so those paths do not need to be typed
-on every run.  When more than one model layout exists, choose it with
---model 1 / --model 2 (or interactively).  A parameter card is then resolved
+on every run. The first argument selects the model (e.g. run_ui example).
+Use --card example_card.dat for one card or --all-cards for the whole batch.
+Legacy --model remains supported. A parameter card is then resolved
 inside that SAME model layout; UI2 rejects a card from another model root to
 avoid mixing model-1 inputs with model-2 SubProcesses.
 
@@ -2859,12 +2860,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "param_card",
+        "model_or_legacy_card",
         nargs="?",
-        type=Path,
         help=(
-            "Optional parameter-card filename/path. Defaults to the only card in "
-            "<build>/input/<variant>/cards, or prompts if multiple cards exist."
+            "Model variant, as in initiate_model.sh (e.g. example). "
+            "Defaults to the last generated model if omitted. "
+            "For backward compatibility, a .dat filename/path is treated as "
+            "the legacy positional parameter card."
+        ),
+    )
+    parser.add_argument(
+        "--card", "--param-card",
+        dest="card",
+        type=Path,
+        default=None,
+        help=(
+            "Optional individual parameter card, resolved within the selected "
+            "model's cards directory. If omitted, select the only available card "
+            "or prompt when multiple cards exist; use --all-cards for a batch."
         ),
     )
 
@@ -2880,9 +2893,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default=None,
         help=(
-            "CMake model variant (e.g. example), or legacy model selector/root "
-            "(1 or 2). Defaults to the last successfully generated MG5 model "
-            "from <build>/generated/current_mg5_output.json."
+            "Backward-compatible model selector. Prefer the first positional "
+            "argument (e.g. run_ui example --card example_card.dat)."
         ),
     )
     parser.add_argument(
@@ -3129,8 +3141,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_cli_model_and_card(args: argparse.Namespace) -> tuple[Optional[str], Optional[Path]]:
+    """Adapt Cristian's model-first CLI without breaking previous UI2 commands.
+
+    New: run_ui example --card param_card.dat
+         run_ui example --all-cards
+    Legacy: run_ui param_card.dat --model example
+            run_ui --model example --all-cards
+            run_ui param_card.dat  (uses the last generated model)
+    """
+    positional = args.model_or_legacy_card
+    explicit_card = args.card
+
+    if args.model is not None:
+        # With --model, a positional value keeps its historical card meaning.
+        if positional is not None and explicit_card is not None:
+            raise ValueError(
+                "Provide the card only once: use either --card FILE or the "
+                "legacy positional card when --model is supplied."
+            )
+        return str(args.model), (explicit_card if explicit_card is not None else
+                                 Path(positional) if positional is not None else None)
+
+    if positional is None:
+        return None, explicit_card
+
+    if explicit_card is not None:
+        return str(positional), explicit_card
+
+    # Preserve the common old command `run_ui example_card.dat` without
+    # confusing a normal model variant (e.g. `example`) with a card.
+    possible_card = Path(positional).expanduser()
+    if possible_card.suffix.lower() == ".dat" or possible_card.is_file():
+        return None, possible_card
+    return str(positional), None
+
+
 def main() -> int:
     args = build_parser().parse_args()
+    cli_model, cli_card = resolve_cli_model_and_card(args)
     script_root = Path(__file__).resolve().parent
 
     file_config: dict[str, object] = {}
@@ -3217,7 +3266,7 @@ def main() -> int:
         backup_value = parse_bool(file_config["backup"], "backup")
     backup = bool(backup_value) if backup_value is not None else False
 
-    model_value = config_value(args.model, file_config, "model", None)
+    model_value = config_value(cli_model, file_config, "model", None)
     project_root_value = config_value(args.project_root, file_config, "project_root", None)
     build_dir_hint = config_value(args.build_dir, file_config, "build_dir", None)
     mg5_output_hint = config_value(args.mg5_output, file_config, "mg5_output", None)
@@ -3251,7 +3300,7 @@ def main() -> int:
                 f"model {layout.model_root}.", file=sys.stderr,
             )
 
-    param_card_value: Optional[object] = args.param_card
+    param_card_value: Optional[object] = cli_card
     if param_card_value is None:
         param_card_value = file_config.get("param_card")
 
@@ -3261,9 +3310,9 @@ def main() -> int:
     explicit_batch_dir = args.cards_dir is not None or "cards_dir" in file_config
     batch_requested = args.all_cards or (explicit_batch_dir and param_card_value is None) or args.card_glob is not None
     if args.all_cards and param_card_value is not None:
-        raise ValueError("--all-cards cannot be combined with an individual param_card")
+        raise ValueError("--all-cards cannot be combined with --card (one individual parameter card)")
     if batch_requested and param_card_value is not None:
-        raise ValueError("--card-glob/batch selection cannot be combined with a single param_card")
+        raise ValueError("Batch selection cannot be combined with --card (one individual parameter card)")
     if batch_requested:
         return run_card_batch(
             args, file_config, config_dir, layout, cards_dir,
