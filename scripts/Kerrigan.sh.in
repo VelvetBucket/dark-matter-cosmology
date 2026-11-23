@@ -13,11 +13,15 @@ if [[ "${KERRIGAN_CONSOLE_CHILD:-0}" != "1" ]]; then
     kerrigan_show_details=0
     kerrigan_help=0
     kerrigan_dry_run=0
+    kerrigan_progress=0
     kerrigan_argv=()
     for kerrigan_arg in "$@"; do
         case "$kerrigan_arg" in
             --debug)
                 kerrigan_show_details=1
+                ;;
+            --progress)
+                kerrigan_progress=1
                 ;;
             --verbose-build)
                 kerrigan_show_details=1
@@ -41,6 +45,11 @@ if [[ "${KERRIGAN_CONSOLE_CHILD:-0}" != "1" ]]; then
     # not expose Kerrigan's --debug option directly.
     if [[ "${KERRIGAN_DEBUG:-0}" == "1" || "${KERRIGAN_VERBOSE_BUILD:-0}" == "1" ]]; then
         kerrigan_show_details=1
+    fi
+
+    if (( kerrigan_progress && kerrigan_show_details )); then
+        printf 'ERROR: --progress cannot be combined with --debug or --verbose-build.\n' >&2
+        exit 2
     fi
 
     # Preserve help/debug functionality without forwarding --debug to the
@@ -69,17 +78,54 @@ if [[ "${KERRIGAN_CONSOLE_CHILD:-0}" != "1" ]]; then
         exit 1
     fi
 
-    if KERRIGAN_CONSOLE_CHILD=1 bash "${BASH_SOURCE[0]}" "${kerrigan_argv[@]}" >"$kerrigan_run_log" 2>&1; then
+    kerrigan_exit_code=0
+    if (( kerrigan_progress && ! kerrigan_dry_run )); then
+        # Keep full diagnostics while forwarding only machine-readable progress
+        # markers. No CMake percentage bars or arbitrary child stdout escapes.
+        set +e
+        KERRIGAN_CONSOLE_CHILD=1 KERRIGAN_EMIT_PROGRESS=1 \
+            bash "${BASH_SOURCE[0]}" "${kerrigan_argv[@]}" 2>&1 \
+            | tee "$kerrigan_run_log" \
+            | while IFS= read -r kerrigan_line; do
+                if [[ "$kerrigan_line" == 'KERRIGAN_PROGRESS|'* ]]; then
+                    if [[ "${KERRIGAN_PROGRESS_PROTOCOL:-0}" == "1" ]]; then
+                        printf '%s\n' "$kerrigan_line"
+                    else
+                        IFS='|' read -r _ completed total stage <<< "$kerrigan_line"
+                        if [[ "$completed" =~ ^[0-9]+$ && "$total" =~ ^[1-9][0-9]*$ ]]; then
+                            percent=$(( completed * 100 / total ))
+                            (( percent >= 100 )) && percent=99
+                            printf 'Progress: %d%% (%d/%d) - %s\n' \
+                                "$percent" "$completed" "$total" "$stage"
+                        fi
+                    fi
+                fi
+            done
+        kerrigan_pipeline_status=("${PIPESTATUS[@]}")
+        set -e
+        kerrigan_exit_code="${kerrigan_pipeline_status[0]}"
+        if (( kerrigan_exit_code == 0 && (kerrigan_pipeline_status[1] != 0 || kerrigan_pipeline_status[2] != 0) )); then
+            kerrigan_exit_code=1
+            printf 'ERROR: Kerrigan could not forward its progress/log stream.\n' >&2
+        fi
+    else
+        KERRIGAN_CONSOLE_CHILD=1 bash "${BASH_SOURCE[0]}" "${kerrigan_argv[@]}" >"$kerrigan_run_log" 2>&1 \
+            || kerrigan_exit_code=$?
+    fi
+
+    if (( kerrigan_exit_code == 0 )); then
         if (( kerrigan_dry_run )); then
             printf 'Kerrigan dry run completed successfully\n'
+        elif (( kerrigan_progress )); then
+            if [[ "${KERRIGAN_PROGRESS_PROTOCOL:-0}" != "1" ]]; then
+                printf 'Progress: 100%% - Completed successfully\n'
+            fi
         else
             printf 'Kerrigan completed successfully\n'
         fi
         exit 0
     else
-        kerrigan_exit_code=$?
-        # Failure is NEVER reported as success. Surface a useful error and
-        # retain the complete diagnostic trace without flooding the user.
+        # Errors remain visible in both modes; detailed logs are preserved.
         kerrigan_last_error="$(grep -E '(^|[[:space:]])ERROR:' "$kerrigan_run_log" | tail -n 1 || true)"
         if [[ -n "$kerrigan_last_error" ]]; then
             printf '%s\n' "$kerrigan_last_error" >&2
@@ -288,6 +334,7 @@ Options:
   --run-name NAME           Custom grouped run name (one subdirectory per card).
   --run-id ID               Advanced: shared ID across multiple Kerrigan calls.
   --allowed-particles FILE  Fallback Overseer-style particle-token filter.
+  --progress                Show only real workflow progress (0-100%) and errors.
   --debug                   Show all detailed output, CMake progress, and timings.
   --verbose-build           Show CMake build progress (normally logged only).
   --dry-run                 Resolve paths/cards/processes but run no calculation.
@@ -1181,6 +1228,28 @@ if [[ $DRY_RUN -eq 1 ]]; then
     exit 0
 fi
 
+# Progress protocol: complete one unit for each processed channel/card pair,
+# and one for each card's validated final output. Keep 100% for the parent
+# wrapper only after all success checks finish. This is work progress, not ETA.
+if [[ "$TASK" == "neq" ]]; then
+    PROGRESS_TOTAL=$(( ${#cards[@]} + 1 ))   # one executable build + one per card
+else
+    PROGRESS_TOTAL=$(( ${#subprocess_folders[@]} * ${#cards[@]} + ${#cards[@]} ))
+fi
+PROGRESS_DONE=0
+kerrigan_progress_event() {
+    [[ "${KERRIGAN_EMIT_PROGRESS:-0}" == "1" ]] || return 0
+    local label="${1:-Running}"
+    label="${label//$'\n'/ }"
+    label="${label//$'\r'/ }"
+    printf 'KERRIGAN_PROGRESS|%d|%d|%s\n' "$PROGRESS_DONE" "$PROGRESS_TOTAL" "$label"
+}
+kerrigan_progress_advance() {
+    PROGRESS_DONE=$(( PROGRESS_DONE + 1 ))
+    kerrigan_progress_event "$1"
+}
+kerrigan_progress_event 'Preparing model and CMake build'
+
 # The same UI2 batch may invoke Kerrigan more than once. Reuse its run ID but
 # never reuse or overwrite a previously materialized parameter-card directory.
 if [[ -d "$RUN_DIR" ]]; then
@@ -1392,6 +1461,7 @@ if [[ "$TASK" == "neq" ]]; then
         echo "ERROR: Executable missing: $BIN_DIR/sigmav" >&2
         exit 1
     fi
+    kerrigan_progress_advance 'Equilibrium-density executable ready'
 
     for card in "${cards[@]}"; do
         out_dir="${CARD_OUTPUTS[$card]}"
@@ -1414,6 +1484,7 @@ if [[ "$TASK" == "neq" ]]; then
         fi
         record_timing neq_compute "$neq_process" "$(basename -- "$card")" "$NEQ_START"
         rm -f -- "$raw_file"
+        kerrigan_progress_advance "Equilibrium density: $(basename -- "$card")"
     done
 
 else
@@ -1436,6 +1507,9 @@ else
                 echo "$sp_folder : missing CPPProcess files" >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
             done
             PIPELINE_FAILED=1
+            for card in "${cards[@]}"; do
+                kerrigan_progress_advance "Channel unavailable: $sp_folder / $(basename -- "$card")"
+            done
             continue
         fi
 
@@ -1468,6 +1542,9 @@ else
                         >> "${CARD_OUTPUTS[$card]}/failed_processes.txt"
                 done
                 PIPELINE_FAILED=1
+                for card in "${cards[@]}"; do
+                    kerrigan_progress_advance "Build failed: $sp_folder / $(basename -- "$card")"
+                done
                 continue
             fi
 
@@ -1538,6 +1615,7 @@ else
 		fi
 		record_timing sigmav_compute "$sp_folder" "$(basename -- "$card")" "$COMPUTE_START"
 		rm -f -- "$raw_file"
+            kerrigan_progress_advance "Channel: $sp_folder / $(basename -- "$card")"
         done
     done
 fi
@@ -1586,6 +1664,12 @@ for card in "${cards[@]}"; do
             card_complete=1
         fi
     fi
+    # Missing channel data is not a successful experiment, even when the
+    # executable returned zero or some other channels produced valid output.
+    if [[ "$card_complete" -ne 1 ]]; then
+        echo "ERROR: Incomplete results for $(basename -- "$card"): $successful_count / ${#subprocess_folders[@]} sigma-v channels completed (task: $TASK)." >&2
+        PIPELINE_FAILED=1
+    fi
     cat >> "$out_dir/run_metadata.txt" <<EOF_META_END
 successful_process_count=$successful_count
 failed_process_count=$failed_count
@@ -1606,6 +1690,7 @@ EOF_META_END
     fi
     echo "Failed operations  : $failed_count"
     echo ""
+    kerrigan_progress_advance "Validated: $(basename -- "$card")"
 done
 
 record_timing kerrigan_total - - "$KERRIGAN_TIMER_START"
@@ -1642,6 +1727,11 @@ PY_TIMING_SUMMARY
 if [[ $PIPELINE_FAILED -ne 0 ]]; then
     echo "KERRIGAN finished with one or more failed subprocess calculations." >&2
     echo "Partial outputs were preserved in their uniquely named run directories." >&2
+    exit 1
+fi
+
+if [[ "$PROGRESS_DONE" -ne "$PROGRESS_TOTAL" ]]; then
+    echo "ERROR: Progress accounting mismatch: $PROGRESS_DONE / $PROGRESS_TOTAL" >&2
     exit 1
 fi
 
