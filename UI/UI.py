@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
+import io
 import csv
 import json
 import math
@@ -59,6 +61,11 @@ from datetime import datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
+
+# The interactive experience stays unchanged. Progress mode reroutes UI text
+# and displays only validated unit-count events from Kerrigan.
+_ACTIVE_PROGRESS: Optional["ProgressReporter"] = None
+_PROGRESS_CONSOLE = sys.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -1425,6 +1432,11 @@ def _discover_named_model_roots(project_root: Path) -> list[Path]:
 
 
 def _choose_interactively(title: str, paths: list[Path]) -> Path:
+    if _ACTIVE_PROGRESS is not None:
+        raise ValueError(
+            f"{title}: select explicitly with --card, --all-cards, or --model "
+            "when using --ui-mode progress."
+        )
     print(f"\n{title}")
     for index, path in enumerate(paths, start=1):
         print(f"  {index}. {path}")
@@ -2359,6 +2371,45 @@ def resolve_sigmav_interval(
     return x_start, x_end, n_points
 
 
+
+@dataclass
+class ProgressReporter:
+    total_units: int = 0
+    completed_units: int = 0
+    last_percent: int = -1
+
+    def emit(self, description: str, *, complete: bool = False) -> None:
+        pct = 100 if complete else (min(99, self.completed_units * 100 // self.total_units)
+                                    if self.total_units else 0)
+        if pct != self.last_percent:
+            print(f"Progress: {pct}% - {description}", file=_PROGRESS_CONSOLE, flush=True)
+            self.last_percent = pct
+
+    def set_total(self, total_units: int) -> None:
+        if total_units <= 0:
+            raise ValueError("Progress mode requires at least one work unit.")
+        self.total_units = total_units
+
+    def consume(self, line: str, *, offset: int, expected_call_units: int) -> tuple[int, int]:
+        fields = line.rstrip("\r\n").split("|", 3)
+        if len(fields) != 4 or fields[0] != "KERRIGAN_PROGRESS":
+            raise RuntimeError(f"Invalid Kerrigan progress event: {line!r}")
+        try:
+            done, total = int(fields[1]), int(fields[2])
+        except ValueError as error:
+            raise RuntimeError(f"Invalid Kerrigan progress counters: {line!r}") from error
+        if total != expected_call_units or not 0 <= done <= total:
+            raise RuntimeError(
+                f"Kerrigan progress disagrees with the UI2 selection: "
+                f"{done}/{total}, expected {expected_call_units}."
+            )
+        new_completed = offset + done
+        if new_completed < self.completed_units or new_completed > self.total_units:
+            raise RuntimeError("Kerrigan progress moved backward or exceeded the batch total.")
+        self.completed_units = new_completed
+        self.emit(fields[3])
+        return done, total
+
 def run_kerrigan(
     kerrigan: Path,
     build_dir: Path,
@@ -2378,6 +2429,7 @@ def run_kerrigan(
     x_start: float = 1e-7,
     x_end: float = 1e7,
     n_points: int = 1000,
+    expected_progress_units: Optional[int] = None,
 ) -> None:
     """Invoke Kerrigan once for a physics point or for a compatible card batch.
 
@@ -2417,6 +2469,10 @@ def run_kerrigan(
         command.extend(["--run-name", run_name])
     if run_id is not None:
         command.extend(["--run-id", run_id])
+    if _ACTIVE_PROGRESS is not None:
+        if expected_progress_units is None or expected_progress_units <= 0:
+            raise RuntimeError("Missing UI2 progress work budget for Kerrigan.")
+        command.append("--progress")
 
     environment = os.environ.copy()
     environment["KERRIGAN_PROCESS_SELECTOR"] = selector_regex
@@ -2424,6 +2480,12 @@ def run_kerrigan(
     environment["KERRIGAN_MODE"] = mode
     environment["KERRIGAN_CANDIDATE"] = candidate.name
     environment["KERRIGAN_CANDIDATE_PDG"] = str(candidate.pdg)
+    if _ACTIVE_PROGRESS is not None:
+        environment["KERRIGAN_PROGRESS_PROTOCOL"] = "1"
+        # Progress output must never reveal compiler percentages, even when
+        # the caller has debugging environment variables enabled.
+        environment.pop("KERRIGAN_DEBUG", None)
+        environment.pop("KERRIGAN_VERBOSE_BUILD", None)
     if selection_report is None:
         # Do not inherit an unrelated single-card report from a previous run.
         environment.pop("KERRIGAN_SELECTION_REPORT", None)
@@ -2454,21 +2516,44 @@ def run_kerrigan(
         if physics_output_root is not None:
             print(f"Physics output root: {physics_output_root}")
 
-    print(f"Kerrigan/run_madgraph working directory: {working_dir}")
-    print(
-        "Note: any external message such as 'This directory ...' refers to "
-        "the working directory shown above."
-    )
+    if _ACTIVE_PROGRESS is None:
+        print(f"Kerrigan/run_madgraph working directory: {working_dir}")
+        print(
+            "Note: any external message such as 'This directory ...' refers to "
+            "the working directory shown above."
+        )
+        subprocess.run(command, cwd=working_dir, env=environment, check=True)
+        print("\nExternal calculation completed successfully.")
+        print(f"Working directory used by Kerrigan/run_madgraph: {working_dir}")
+        return
 
-    subprocess.run(
-        command,
-        cwd=working_dir,
-        env=environment,
-        check=True,
-    )
-
-    print("\nExternal calculation completed successfully.")
-    print(f"Working directory used by Kerrigan/run_madgraph: {working_dir}")
+    reporter = _ACTIVE_PROGRESS
+    assert expected_progress_units is not None
+    offset = reporter.completed_units
+    saw_marker = False
+    last_done = -1
+    with subprocess.Popen(
+        command, cwd=working_dir, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, encoding="utf-8", errors="replace",
+    ) as process:
+        assert process.stdout is not None
+        for line in process.stdout:
+            if line.startswith("KERRIGAN_PROGRESS|"):
+                last_done, _ = reporter.consume(
+                    line, offset=offset, expected_call_units=expected_progress_units
+                )
+                saw_marker = True
+            elif line.startswith("ERROR:") or "Kerrigan failed" in line:
+                print(line.rstrip(), file=sys.stderr, flush=True)
+        exit_code = process.wait()
+    if exit_code:
+        raise subprocess.CalledProcessError(exit_code, command)
+    if not saw_marker or last_done != expected_progress_units:
+        raise RuntimeError(
+            "Kerrigan completed without all expected progress events; "
+            "check that the CMake-generated Kerrigan.sh uses the updated template."
+        )
 
 @dataclass
 class CardBatchPlan:
@@ -2707,6 +2792,9 @@ def run_card_batch(
     if problems:
         raise ValueError("Batch preflight failed; no physics outputs were changed:\n" + "\n".join(problems))
 
+    if _ACTIVE_PROGRESS is not None:
+        _ACTIVE_PROGRESS.set_total(sum(len(plan.selected_names) + 1 for plan in plans))
+
     signatures = {plan.selected_names for plan in plans}
     candidate_pdgs = {plan.candidate.pdg for plan in plans}
     combined_batch = len(signatures) == 1 and len(candidate_pdgs) == 1
@@ -2824,6 +2912,7 @@ def run_card_batch(
             verbose=verbose,
             run_name=run_name, run_id=run_id,
             sigmav_profile=sigmav_profile, x_start=x_start, x_end=x_end, n_points=n_points,
+            expected_progress_units=len(plans) * (len(plans[0].selected_names) + 1),
         )
     else:
         # A different combined-mode selection changes the physical sum. Do NOT
@@ -2843,6 +2932,7 @@ def run_card_batch(
                 verbose=verbose,
                 run_name=run_name, run_id=run_id,
                 sigmav_profile=sigmav_profile, x_start=x_start, x_end=x_end, n_points=n_points,
+                expected_progress_units=len(plan.selected_names) + 1,
             )
     print(f"\nCompleted sigma-v for {len(plans)} parameter cards.")
     return 0
@@ -3109,6 +3199,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Custom name for one grouped run containing a subdirectory per parameter card.",
     )
+    parser.add_argument(
+        "--ui-mode",
+        choices=("interactive", "progress"),
+        default="interactive",
+        help=(
+            "interactive: preserve the current review/confirmation workflow (default); "
+            "progress: no prompts, only 0-100%% work progress, errors and output files."
+        ),
+    )
 
     parser.add_argument(
         "--width-tolerance",
@@ -3177,8 +3276,7 @@ def resolve_cli_model_and_card(args: argparse.Namespace) -> tuple[Optional[str],
     return str(positional), None
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def _execute_ui(args: argparse.Namespace) -> int:
     cli_model, cli_card = resolve_cli_model_and_card(args)
     script_root = Path(__file__).resolve().parent
 
@@ -3253,6 +3351,8 @@ def main() -> int:
     if verbose_value is None and "verbose" in file_config:
         verbose_value = parse_bool(file_config["verbose"], "verbose")
 
+    if _ACTIVE_PROGRESS is not None:
+        verbose_value = False
     if verbose_value is None:
         if sys.stdin.isatty():
             verbose = yes_no("Would you like to display the detailed interface?", default=True)
@@ -3671,6 +3771,8 @@ def main() -> int:
         print("-" * 72)
 
     selector_regex = bash_regex_for_selected_processes(records)
+    if _ACTIVE_PROGRESS is not None:
+        _ACTIVE_PROGRESS.set_total(selected_count + 1)
 
     # Both tasks now use the same CMake-configured Kerrigan runtime.
     # Kerrigan itself decides whether to execute the full density branch or
@@ -3690,12 +3792,47 @@ def main() -> int:
         run_name=(None if config_value(args.run_name, file_config, "run_name", None) is None
                   else str(config_value(args.run_name, file_config, "run_name", None))),
         sigmav_profile=sigmav_profile, x_start=x_start, x_end=x_end, n_points=n_points,
+        expected_progress_units=selected_count + 1,
     )
 
     if not verbose:
         print("Calculation completed successfully using the filtered subprocess selection.")
 
     return 0
+
+
+def main() -> int:
+    global _ACTIVE_PROGRESS, _PROGRESS_CONSOLE
+    args = build_parser().parse_args()
+    if args.ui_mode != "progress":
+        return _execute_ui(args)
+
+    if args.verbose is True:
+        raise ValueError("--ui-mode progress cannot be combined with --verbose; use interactive mode.")
+    _PROGRESS_CONSOLE = sys.stdout
+    _ACTIVE_PROGRESS = ProgressReporter()
+    _ACTIVE_PROGRESS.emit("Validating inputs and selecting processes")
+    # Existing interactive prompts, tables, status messages and full output
+    # are suppressed, but all errors remain on stderr. Kerrigan streams only
+    # authenticated numerical work-unit progress events to _PROGRESS_CONSOLE.
+    args.yes = True
+    args.verbose = False
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = _execute_ui(args)
+        if result == 0:
+            if args.dry_run:
+                print("Dry run completed: no physics files were generated.",
+                      file=_PROGRESS_CONSOLE, flush=True)
+            else:
+                if _ACTIVE_PROGRESS.total_units == 0 or \
+                        _ACTIVE_PROGRESS.completed_units != _ACTIVE_PROGRESS.total_units:
+                    raise RuntimeError("UI2 and Kerrigan did not complete all selected work units.")
+                _ACTIVE_PROGRESS.emit("All parameter-card results were validated", complete=True)
+                print("Kerrigan completed successfully", file=_PROGRESS_CONSOLE, flush=True)
+        return result
+    finally:
+        _ACTIVE_PROGRESS = None
 
 
 if __name__ == "__main__":
